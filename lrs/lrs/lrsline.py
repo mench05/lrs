@@ -26,10 +26,17 @@ from .utils import *
 
 
 class LrsLine(object):
-    def __init__(self, fid, routeId, geo):
+    def __init__(self, fid, routeId, geo, **kwargs):
         self.fid = fid  # line
         self.routeId = routeId
         self.geo = QgsGeometry(geo)  # store copy of QgsGeometry, may be None
+        self.attrs = kwargs.get('attrs', {})
+        self.measureFrom = toFloatOrNone(kwargs.get('measureFrom'))
+        self.measureTo = toFloatOrNone(kwargs.get('measureTo'))
+        self.codivia = kwargs.get('codivia')
+        self.direccio = kwargs.get('direccio')
+        self.idlrs = kwargs.get('idlrs')
+        self.isRamal = kwargs.get('isRamal', False)
 
     def getNumParts(self):
         if not self.geo: return 0

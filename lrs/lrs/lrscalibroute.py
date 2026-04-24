@@ -28,6 +28,7 @@ from .lrscalibpart import *
 from .lrsmilestone import *
 from .lrsorigin import LrsOrigin
 from .lrsroutebase import LrsRouteBase
+from .utils import isRamalCode
 
 
 # Route used in calibration
@@ -49,9 +50,29 @@ class LrsCalibRoute(LrsRouteBase):
         self.milestones = []  # LrsMilestone list
         # cached all errors, route itself and parts
         self.allErrors_ = []
+        self.useOfficialArcMeasures = kwargs.get('useOfficialArcMeasures', False)
+        self.tolerantMode = kwargs.get('tolerantMode', True)
+        self.specialRamalHandling = kwargs.get('specialRamalHandling', True)
+        self.specialRoundaboutHandling = kwargs.get('specialRoundaboutHandling', True)
+        self.roundaboutMode = kwargs.get('roundaboutMode', 'independent')
+        self.allowSharedGeometryDirections = kwargs.get('allowSharedGeometryDirections', True)
+        self.strictDirection = kwargs.get('strictDirection', True)
+
+    def addDiagnostic(self, type, geo, **kwargs):
+        severity = kwargs.pop('severity', 'WARNING')
+        elementType = kwargs.pop('elementType', '')
+        self.errors.append(LrsError(type, geo, routeId=self.routeId, severity=severity,
+                                    elementType=elementType, **kwargs))
 
     def addLine(self, line):
         self.lines.append(line)
+
+    def allowSingleMilestoneParts(self):
+        if not self.tolerantMode or not self.specialRamalHandling:
+            return False
+        if isRamalCode(self.routeId):
+            return True
+        return any(getattr(line, 'isRamal', False) for line in self.lines)
 
     # returns: { removedErrorChecksums:[], updatedErrors:[], addedErrors[] }
     def calibrate(self, extrapolate):
@@ -89,13 +110,16 @@ class LrsCalibRoute(LrsRouteBase):
                     self.errors.append(LrsError(LrsError.NO_MEASURE, point.geo, routeId=self.routeId, origins=[origin]))
 
         else:
-            self.buildParts()
-            self.createMilestones()
-            self.attachMilestones()
-            self.calibrateParts()
-            if extrapolate:
-                self.extrapolateParts()
-            self.checkPartOverlaps()
+            if self.useOfficialArcMeasures:
+                self.buildPartsFromOfficialMeasures()
+            else:
+                self.buildParts()
+                self.createMilestones()
+                self.attachMilestones()
+                self.calibrateParts()
+                if extrapolate:
+                    self.extrapolateParts()
+                self.checkPartOverlaps()
 
     def calibrateAndGetUpdates(self, extrapolate):
         oldErrorChecksums = list(e.getChecksum() for e in self.getErrors())
@@ -201,42 +225,159 @@ class LrsCalibRoute(LrsRouteBase):
         # debug ( 'joined to %s parts' % ( len(joined)))
         return joined
 
+    def linePolylines(self, line):
+        if not line.geo:
+            return []
+        if line.geo.isEmpty():
+            origin = LrsOrigin(QgsWkbTypes.LineGeometry, line.fid)
+            self.addDiagnostic(LrsError.EMPTY_GEOMETRY, line.geo, origins=[origin], severity='WARNING',
+                               elementType='ARC', codivia=line.codivia, direccio=line.direccio, idlrs=line.idlrs,
+                               message='Empty line geometry')
+            return []
+
+        if QgsWkbTypes.isSingleType(line.geo.wkbType()):
+            polys = [line.geo.asPolyline()]
+        else:
+            polys = line.geo.asMultiPolyline()
+
+        results = []
+        for i in range(len(polys)):
+            poly = polys[i]
+            if poly is None:
+                continue
+
+            # Remove only consecutive duplicate coordinates. Closed rings keep
+            # their start/end vertex because a roundabout is valid geometry, not
+            # a zero length line.
+            for j in range(len(poly) - 1, 0, -1):
+                keep_closed_endpoint = j == len(poly) - 1 and pointNear(poly[j], poly[0])
+                if not keep_closed_endpoint and poly[j].x() == poly[j - 1].x() and poly[j].y() == poly[j - 1].y():
+                    del poly[j]
+
+            if len(poly) < 2:
+                continue
+
+            results.append({
+                'polyline': poly,
+                'fid': line.fid,
+                'geoPart': i,
+                'nGeoParts': len(polys),
+                'line': line,
+            })
+        return results
+
+    def buildPartsFromOfficialMeasures(self):
+        self.parts = []
+        for line in self.lines:
+            if not line.geo:
+                self.addDiagnostic(LrsError.MISSING_GEOMETRY, QgsGeometry(), severity='WARNING',
+                                   elementType='ARC', codivia=line.codivia, direccio=line.direccio, idlrs=line.idlrs,
+                                   message='Missing line geometry')
+                continue
+
+            for poly in self.linePolylines(line):
+                polyline = poly['polyline']
+                origin = LrsOrigin(QgsWkbTypes.LineGeometry, poly['fid'], poly['geoPart'], poly['nGeoParts'])
+                origins = [origin]
+                geo = QgsGeometry.fromPolylineXY(polyline)
+
+                if self.specialRoundaboutHandling and polylineClosed(polyline) and geo.length() > 0:
+                    self.addDiagnostic(LrsError.CLOSED_RING_OR_ROUNDABOUT, geo, origins=origins,
+                                       severity='WARNING', elementType='ARC', codivia=line.codivia,
+                                       direccio=line.direccio, idlrs=line.idlrs,
+                                       message='Closed ring/roundabout treated as independent route part')
+                    if self.roundaboutMode == 'exclude':
+                        continue
+
+                if self.specialRamalHandling and line.isRamal:
+                    self.addDiagnostic(LrsError.RAMAL_INDEPENDENT_ROUTE, geo, origins=origins,
+                                       severity='WARNING', elementType='ARC', codivia=line.codivia,
+                                       direccio=line.direccio, idlrs=line.idlrs,
+                                       message='Branch arc kept as independent route')
+
+                m_from = line.measureFrom
+                m_to = line.measureTo
+                if m_from is None or m_to is None:
+                    self.addDiagnostic(LrsError.MISSING_OFFICIAL_MEASURE, geo, origins=origins,
+                                       severity='WARNING' if self.tolerantMode else 'ERROR',
+                                       elementType='ARC', codivia=line.codivia, direccio=line.direccio,
+                                       idlrs=line.idlrs, message='Missing POSICIOINI/POSICIOFIN')
+                    if not self.tolerantMode:
+                        continue
+                    # Without official measures this arc cannot build an M record,
+                    # but other valid arcs in the same run should still calibrate.
+                    continue
+
+                if m_to < m_from:
+                    self.addDiagnostic(LrsError.REVERSED_MEASURES, geo, origins=origins,
+                                       severity='WARNING', elementType='ARC', codivia=line.codivia,
+                                       direccio=line.direccio, idlrs=line.idlrs,
+                                       measure=[m_from, m_to],
+                                       message='Official measures decrease along this logical route')
+
+                if doubleNear(abs(m_to - m_from), 0.0) and geo.length() > 0:
+                    self.addDiagnostic(LrsError.MEASURE_ZERO_WITH_GEOMETRY, geo, origins=origins,
+                                       severity='WARNING', elementType='ARC', codivia=line.codivia,
+                                       direccio=line.direccio, idlrs=line.idlrs,
+                                       measure=[m_from, m_to],
+                                       message='Official measure delta is zero but geometry has length')
+                    continue
+
+                part = LrsCalibPart(polyline, self.routeId, origins, self.crs, self.measureUnit, self.distanceArea)
+                if part.length <= 0:
+                    self.addDiagnostic(LrsError.EMPTY_GEOMETRY, geo, origins=origins, severity='WARNING',
+                                       elementType='ARC', codivia=line.codivia, direccio=line.direccio,
+                                       idlrs=line.idlrs, message='Zero length line geometry')
+                    continue
+
+                part.records.append(LrsRecord(m_from, m_to, 0, part.length))
+                part.goodMilestones = []
+                self.parts.append(part)
+
+        self.checkPartOverlaps()
+
+    def eventPointXY(self, start, tolerance=0, startOffset=0):
+        if startOffset == 0:
+            pkPoint = self.pkPointXY(start)
+            if pkPoint:
+                return pkPoint, None
+        return super(LrsCalibRoute, self).eventPointXY(start, tolerance, startOffset)
+
+    def pkPointXY(self, measure):
+        if measure is None:
+            return None
+        for point in self.points:
+            if not point.geo or point.measure is None:
+                continue
+            if not doubleNear(float(point.measure), float(measure)):
+                continue
+            pts = [point.geo.asPoint()] if QgsWkbTypes.isSingleType(point.geo.wkbType()) else point.geo.asMultiPoint()
+            for pnt in pts:
+                return pnt
+        return None
+
     # create LrsRoutePart objects from geometryParts
     def buildParts(self):
         # debug ( 'routeId %s buildParts' % (self.routeId))
         self.parts = []
         polylines = []  # list of { polyline:, fid:, geoPart:, nGeoParts: }
         for line in self.lines:
-            if not line.geo: continue
-            # Qgis::singleType and flatType are not in bindings (2.0)
-            polys = None  # list of QgsPolyline
-            if QgsWkbTypes.isSingleType(line.geo.wkbType()):
-                polys = [line.geo.asPolyline()]
-            else:  # multi line
-                polys = line.geo.asMultiPolyline()
-
-            for i in range(len(polys)):
-                poly = polys[i]
-
-                if poly is None:
-                    # TODO(?): report degenerated lines as errors
-                    continue
-
-                # clean duplicate coordinates
-                for j in range(len(poly) - 1, 0, -1):
-                    if poly[j].x() == poly[j - 1].x() and poly[j].y() == poly[j - 1].y():
-                        del poly[j]
-
-                if len(poly) < 2:
-                    # TODO(?): report degenerated lines as errors
-                    continue
-
-                polylines.append({
-                    'polyline': poly,
-                    'fid': line.fid,
-                    'geoPart': i,
-                    'nGeoParts': len(polys),
-                })
+            for poly in self.linePolylines(line):
+                geo = QgsGeometry.fromPolylineXY(poly['polyline'])
+                origin = LrsOrigin(QgsWkbTypes.LineGeometry, poly['fid'], poly['geoPart'], poly['nGeoParts'])
+                if self.specialRoundaboutHandling and polylineClosed(poly['polyline']) and geo.length() > 0:
+                    self.addDiagnostic(LrsError.CLOSED_RING_OR_ROUNDABOUT, geo, origins=[origin],
+                                       severity='WARNING', elementType='ARC', codivia=line.codivia,
+                                       direccio=line.direccio, idlrs=line.idlrs,
+                                       message='Closed ring/roundabout kept as independent part')
+                    if self.roundaboutMode == 'exclude':
+                        continue
+                if self.specialRamalHandling and line.isRamal:
+                    self.addDiagnostic(LrsError.RAMAL_INDEPENDENT_ROUTE, geo, origins=[origin],
+                                       severity='WARNING', elementType='ARC', codivia=line.codivia,
+                                       direccio=line.direccio, idlrs=line.idlrs,
+                                       message='Branch arc kept as independent route')
+                polylines.append(poly)
 
         # ------------------- snap ends -------------------
         if self.snap > 0:
@@ -356,7 +497,8 @@ class LrsCalibRoute(LrsRouteBase):
                 if not connected:  # no more parts can be connected
                     break
 
-            part = LrsCalibPart(polyline, self.routeId, origins, self.crs, self.measureUnit, self.distanceArea)
+            part = LrsCalibPart(polyline, self.routeId, origins, self.crs, self.measureUnit, self.distanceArea,
+                                allowSingleMilestone=self.allowSingleMilestoneParts())
             if part.length > 0:
                 self.parts.append(part)
             else:
@@ -411,7 +553,8 @@ class LrsCalibRoute(LrsRouteBase):
                 polyline = [part.polyline[0], part.polyline[-1]]
 
                 self.parts.append(
-                    LrsCalibPart(polyline, self.routeId, origins, self.crs, self.measureUnit, self.distanceArea))
+                    LrsCalibPart(polyline, self.routeId, origins, self.crs, self.measureUnit, self.distanceArea,
+                                 allowSingleMilestone=self.allowSingleMilestoneParts()))
 
         # reconnect parts after parallels span
         if parallelParts and self.parallelMode == 'span':
@@ -461,7 +604,9 @@ class LrsCalibRoute(LrsRouteBase):
         self.milestones = []
 
         # check duplicates
-        # TODO: maybe allow duplicates? Could be end/start of discontinuous segments
+        # Official two-way roads may have PKs at the same coordinate for both
+        # directions. Geometry alone is not a safe identity; keep direction and
+        # route fields in the uniqueness key.
         nodes = {}
         for point in self.points:
             if not point.geo: continue
@@ -485,11 +630,13 @@ class LrsCalibRoute(LrsRouteBase):
             for p in pnts:
                 pnt = p['point']
                 ph = pointHash(pnt)
+                pk_key = (ph, normalizeRouteId(point.routeId), point.codivia, point.direccio, point.idpk,
+                          point.measure)
 
                 origin = LrsOrigin(QgsWkbTypes.PointGeometry, point.fid, p['geoPart'], p['nGeoParts'])
 
-                if not ph in nodes:
-                    nodes[ph] = {
+                if not pk_key in nodes:
+                    nodes[pk_key] = {
                         'pnt': pnt,
                         'npoints': 1,
                         'measures': [point.measure],
@@ -498,11 +645,11 @@ class LrsCalibRoute(LrsRouteBase):
                         'origins': [origin]
                     }
                 else:
-                    nodes[ph]['npoints'] += 1
-                    nodes[ph]['measures'].append(point.measure)
+                    nodes[pk_key]['npoints'] += 1
+                    nodes[pk_key]['measures'].append(point.measure)
                     # nodes[ ph ]['fids'].append( point.fid )
                     # nodes[ ph ]['geoPart'].append( ['geoPart'] )
-                    nodes[ph]['origins'].append(origin)
+                    nodes[pk_key]['origins'].append(origin)
 
         for node in nodes.values():
             # debug ( "npoints = %s" % node['npoints'] )
@@ -616,4 +763,3 @@ class LrsCalibRoute(LrsRouteBase):
         for part in self.parts:
             length += part.getGoodLength()
         return length
-

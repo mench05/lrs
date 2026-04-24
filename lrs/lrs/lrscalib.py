@@ -72,6 +72,30 @@ class LrsCalib(LrsBase):
         self.threshold = kwargs.get('threshold', 10.0)
         self.parallelMode = kwargs.get('parallelMode', 'error')
         self.crs = kwargs.get('crs')
+        self.useCompositeRouteId = kwargs.get('useCompositeRouteId', False)
+        self.compositeRouteFields = kwargs.get('compositeRouteFields', ['CODIVIA', 'DIRECCIO'])
+        if isinstance(self.compositeRouteFields, str):
+            self.compositeRouteFields = [f.strip() for f in self.compositeRouteFields.split(',') if f.strip()]
+        self.useOfficialArcMeasures = kwargs.get('useOfficialArcMeasures', False)
+        self.tolerantMode = kwargs.get('tolerantMode', True)
+        self.strictDirection = kwargs.get('strictDirection', False)
+        self.allowSharedGeometryDirections = kwargs.get('allowSharedGeometryDirections', True)
+        self.specialRamalHandling = kwargs.get('specialRamalHandling', True)
+        self.specialRoundaboutHandling = kwargs.get('specialRoundaboutHandling', True)
+        self.generateDiagnostics = kwargs.get('generateDiagnostics', True)
+        self.roundaboutMode = kwargs.get('roundaboutMode', 'independent')
+        self.codiviaField = kwargs.get('codiviaField', 'CODIVIA')
+        self.directionField = kwargs.get('directionField', 'DIRECCIO')
+        self.idlrsField = kwargs.get('idlrsField', 'IDLRS')
+        self.lineFallbackIdField = kwargs.get('lineFallbackIdField', 'ID')
+        self.idpkField = kwargs.get('idpkField', 'IDPK')
+        self.positionPkField = kwargs.get('positionPkField', 'POSICIOPK')
+        self.lineMeasureFromField = kwargs.get('lineMeasureFromField', 'POSICIOINI')
+        self.lineMeasureToField = kwargs.get('lineMeasureToField', 'POSICIOFIN')
+        self.officialArcMeasureScale = kwargs.get('officialArcMeasureScale', 'auto')
+        self.officialArcMeasureScaleResolved = 1.0
+        self.officialArcMeasureTransforms = {}
+        self.ramalSuffixes = kwargs.get('ramalSuffixes', None)
 
 
         self.distanceArea = QgsDistanceArea()
@@ -104,6 +128,11 @@ class LrsCalib(LrsBase):
         self.points = {}  # dict of LrsPoint with fid as key
 
         self.errors = []  # LrsError list
+        self.lineGeometryDirections = {}
+        self.pointLocationDirections = {}
+        self.routeDirections = {}
+        self._sharedGeometryDiagnostics = set()
+        self._pkLocationDiagnostics = set()
 
         self.progressCounts = {}
 
@@ -124,6 +153,14 @@ class LrsCalib(LrsBase):
             ('length', 'Total length of all lines'),
             ('lengthIncluded', 'Length of included lines'),
             ('lengthOk', 'Length of successfully created LRS'),
+            ('routes', 'Logical routes created'),
+            ('warnings', 'Non fatal warnings'),
+            ('fatalErrors', 'Fatal errors'),
+            ('ramals', 'Branch arcs'),
+            ('closedRings', 'Closed rings/roundabouts'),
+            ('reversedMeasures', 'Arcs with reversed measures'),
+            ('sharedGeometryDirections', 'Shared geometries by direction'),
+            ('sameLocationDifferentDirectionPk', 'PKs same location by direction'),
             # ( 'lengthError', 'Length of included lines without LRS' ),
         )
 
@@ -179,7 +216,14 @@ class LrsCalib(LrsBase):
         # debug ( 'normalId = %s orig type = %s' % (normalId, type(routeId) ) )
         if normalId not in self.routes:
             self.routes[normalId] = LrsCalibRoute(self.lineLayer, routeId, self.snap, self.threshold, self.crs,
-                                                  self.measureUnit, self.distanceArea, parallelMode=self.parallelMode)
+                                                  self.measureUnit, self.distanceArea, parallelMode=self.parallelMode,
+                                                  useOfficialArcMeasures=self.useOfficialArcMeasures,
+                                                  tolerantMode=self.tolerantMode,
+                                                  strictDirection=self.strictDirection,
+                                                  allowSharedGeometryDirections=self.allowSharedGeometryDirections,
+                                                  specialRamalHandling=self.specialRamalHandling,
+                                                  specialRoundaboutHandling=self.specialRoundaboutHandling,
+                                                  roundaboutMode=self.roundaboutMode)
         return self.routes[normalId]
 
 
@@ -192,6 +236,216 @@ class LrsCalib(LrsBase):
             return routeId in self.selection
         elif self.selectionMode == 'exclude':
             return routeId not in self.selection
+
+    def getFeatureAttrs(self, feature):
+        attrs = {}
+        for field in feature.fields():
+            attrs[field.name()] = feature[field.name()]
+        return attrs
+
+    def geometrySignature(self, geo):
+        if not geo:
+            return None
+        box = geo.boundingBox()
+        # Avoid using the full WKB as a per-feature dictionary key. On official
+        # road layers that can be very large and makes Registering lines crawl.
+        return (
+            round(box.xMinimum(), 6), round(box.yMinimum(), 6),
+            round(box.xMaximum(), 6), round(box.yMaximum(), 6),
+            round(geo.length(), 6)
+        )
+
+    def featureRouteId(self, feature, routeFieldName):
+        if self.useCompositeRouteId:
+            routeId = buildCompositeRouteId(feature, routeFieldName,
+                                            self.compositeRouteFields,
+                                            [self.lineFallbackIdField, 'ID'])
+        else:
+            routeId = feature[routeFieldName]
+            if self.strictDirection:
+                direction = cleanRouteIdPart(featureValue(feature, self.directionField, None))
+                base = cleanRouteIdPart(routeId)
+                if base and direction:
+                    routeId = '%s_%s' % (base, direction)
+        if routeId == '' or routeId == NULL:
+            routeId = None
+        return routeId
+
+    def addDiagnostic(self, type, geo, **kwargs):
+        if not self.generateDiagnostics:
+            return
+        severity = kwargs.pop('severity', 'WARNING')
+        routeId = kwargs.pop('routeId', None)
+        self.errors.append(LrsError(type, geo, routeId=routeId, severity=severity, **kwargs))
+
+    def countErrorStats(self):
+        warnings = 0
+        errors = 0
+        reversedMeasures = 0
+        closedRings = 0
+        ramals = 0
+        shared = 0
+        samePk = 0
+        for error in self.getErrors():
+            if error.severity == 'ERROR':
+                errors += 1
+            elif error.severity == 'WARNING':
+                warnings += 1
+            if error.type == LrsError.REVERSED_MEASURES:
+                reversedMeasures += 1
+            elif error.type == LrsError.CLOSED_RING_OR_ROUNDABOUT:
+                closedRings += 1
+            elif error.type == LrsError.RAMAL_INDEPENDENT_ROUTE:
+                ramals += 1
+            elif error.type == LrsError.SHARED_GEOMETRY_MULTIPLE_DIRECTIONS:
+                shared += 1
+            elif error.type == LrsError.PK_SAME_LOCATION_DIFFERENT_DIRECTION:
+                samePk += 1
+        self.stats['warnings'] = warnings
+        self.stats['fatalErrors'] = errors
+        self.stats['reversedMeasures'] = reversedMeasures
+        self.stats['closedRings'] = closedRings
+        self.stats['ramals'] = ramals
+        self.stats['sharedGeometryDirections'] = shared
+        self.stats['sameLocationDifferentDirectionPk'] = samePk
+
+    def logSummary(self):
+        logInfo('LRS calibration: %s arcs processed, %s PKs processed, %s logical routes created' %
+                (len(self.lines), len(self.points), len(self.routes)))
+        directions = {}
+        for routeId, direction in self.routeDirections.items():
+            directions[direction] = directions.get(direction, 0) + 1
+        logInfo('LRS calibration: routes by direction %s' % directions)
+        logInfo('LRS calibration: %s shared geometries, %s PK same location/different direction, '
+                '%s branches, %s closed rings, %s reversed measures, %s warnings, %s errors' %
+                (self.stats.get('sharedGeometryDirections', 0),
+                 self.stats.get('sameLocationDifferentDirectionPk', 0),
+                 self.stats.get('ramals', 0),
+                 self.stats.get('closedRings', 0),
+                 self.stats.get('reversedMeasures', 0),
+                 self.stats.get('warnings', 0),
+                 self.stats.get('fatalErrors', 0)))
+
+    def officialMeasureFieldsAvailable(self):
+        return fieldExists(self.lineLayer, self.lineMeasureFromField) and fieldExists(self.lineLayer,
+                                                                                     self.lineMeasureToField)
+
+    def resolveOfficialArcMeasureScale(self):
+        if self.officialArcMeasureScale != 'auto':
+            try:
+                return float(self.officialArcMeasureScale)
+            except (TypeError, ValueError):
+                return 1.0
+
+        # Keep official arc measures in their native unit unless explicitly set.
+        # VALORPK/POSICIOPK is handled below as a route transform, not a plain
+        # offset, because VALORPK=48 and POSICIOPK=48000 need scale 0.001.
+        return 1.0
+
+    def median(self, values):
+        values = sorted(values)
+        if not values:
+            return None
+        return values[len(values) // 2]
+
+    def inferPkTransform(self, pairs):
+        # pairs are (position measure, selected PK measure)
+        if not pairs:
+            return 1.0, 0.0
+
+        scales = []
+        for i in range(len(pairs) - 1):
+            p1, v1 = pairs[i]
+            for j in range(i + 1, len(pairs)):
+                p2, v2 = pairs[j]
+                dp = p2 - p1
+                dv = v2 - v1
+                if not doubleNear(dp, 0.0):
+                    scales.append(dv / dp)
+
+        scale = self.median(scales)
+        if scale is None:
+            position, selected = pairs[0]
+            if abs(position) > 100 * max(abs(selected), 1):
+                scale = 0.001
+            else:
+                scale = 1.0
+
+        offsets = [selected - scale * position for position, selected in pairs]
+        return scale, self.median(offsets) or 0.0
+
+    def buildOfficialArcMeasureTransforms(self):
+        transforms = {}
+        if not self.useOfficialArcMeasures:
+            return transforms
+        if self.pointMeasureField == self.positionPkField:
+            return transforms
+        if not fieldExists(self.pointLayer, self.positionPkField):
+            return transforms
+
+        pairsByRoute = {}
+        for feature in self.pointLayer.getFeatures():
+            routeId = self.featureRouteId(feature, self.pointRouteField)
+            if routeId is None:
+                continue
+            selectedMeasure = toFloatOrNone(featureValue(feature, self.pointMeasureField, None))
+            positionMeasure = toFloatOrNone(featureValue(feature, self.positionPkField, None))
+            if selectedMeasure is None or positionMeasure is None:
+                continue
+            pairsByRoute.setdefault(normalizeRouteId(routeId), []).append((positionMeasure, selectedMeasure))
+
+        for routeId, pairs in pairsByRoute.items():
+            transforms[routeId] = self.inferPkTransform(pairs)
+
+        if transforms:
+            logInfo('LRS calibration: applying route transforms from %s against %s for official arc measures' %
+                    (self.pointMeasureField, self.positionPkField))
+        return transforms
+
+    def detectSameArcMultiplePkDirections(self):
+        if not self.allowSharedGeometryDirections:
+            return
+        seen = {}
+        sqrThreshold = self.threshold * self.threshold
+        lineIndex = QgsSpatialIndex()
+        lineByIndexFid = {}
+        idxFid = 1
+        for line in self.lines.values():
+            if not line.geo:
+                continue
+            feature = QgsFeature(idxFid)
+            feature.setGeometry(line.geo)
+            lineIndex.insertFeature(feature)
+            lineByIndexFid[idxFid] = line
+            idxFid += 1
+
+        for point in self.points.values():
+            if not point.geo:
+                continue
+            searchRect = point.geo.boundingBox()
+            searchRect.grow(self.threshold)
+            for idx in lineIndex.intersects(searchRect):
+                line = lineByIndexFid[idx]
+                if line.codivia is not None and point.codivia is not None and line.codivia != point.codivia:
+                    continue
+                pts = [point.geo.asPoint()] if QgsWkbTypes.isSingleType(point.geo.wkbType()) else point.geo.asMultiPoint()
+                for pnt in pts:
+                    sqDist, nearestPnt, afterVertex, leftOf = line.geo.closestSegmentWithContext(pnt, 0)
+                    if sqDist > sqrThreshold:
+                        continue
+                    directions = seen.setdefault(line.fid, {})
+                    directions.setdefault(point.direccio, []).append(point.fid)
+                    if len([d for d in directions if d is not None]) > 1:
+                        diag_key = (line.fid, point.direccio)
+                        if getattr(self, '_sameArcDirectionDiagnostics', None) is None:
+                            self._sameArcDirectionDiagnostics = set()
+                        if diag_key not in self._sameArcDirectionDiagnostics:
+                            self._sameArcDirectionDiagnostics.add(diag_key)
+                            self.addDiagnostic(LrsError.SAME_ARC_MULTIPLE_PK_DIRECTIONS, point.geo,
+                                               routeId=point.routeId, severity='WARNING', elementType='PK',
+                                               codivia=point.codivia, direccio=point.direccio, idpk=point.idpk,
+                                               measure=point.measure,
+                                               message='Same arc has PKs from multiple directions')
 
     # ------------------- GENERATE (CALIBRATE) -------------------
 
@@ -216,13 +470,40 @@ class LrsCalib(LrsBase):
         self.points = {}
         self.lines = {}
         self.errors = []  # reset
+        self.lineGeometryDirections = {}
+        self.pointLocationDirections = {}
+        self.routeDirections = {}
+        self._sharedGeometryDiagnostics = set()
+        self._pkLocationDiagnostics = set()
+        self._sameArcDirectionDiagnostics = set()
+        self.officialArcMeasureTransforms = {}
 
         self.stats = {}
         for s in self.statsNames:
             self.stats[s[0]] = 0
 
+        if self.crs and self.crs.mapUnits() == QgsUnitTypes.DistanceDegrees:
+            self.addDiagnostic(LrsError.CRS_IN_DEGREES, QgsGeometry(), severity='WARNING',
+                               elementType='PROJECT',
+                               message='Project CRS uses degrees; distance thresholds are angular')
+
+        if self.useOfficialArcMeasures and not self.officialMeasureFieldsAvailable():
+            self.useOfficialArcMeasures = False
+            logWarning('LRS calibration: official arc measures disabled because POSICIOINI/POSICIOFIN fields were not found')
+
+        if self.useOfficialArcMeasures and self.pointMeasureField != self.positionPkField and fieldExists(
+                self.pointLayer, self.positionPkField):
+            self.useOfficialArcMeasures = False
+            logWarning('LRS calibration: official arc measures disabled because selected PK measure field is %s, not %s' %
+                       (self.pointMeasureField, self.positionPkField))
+
+        officialArcMeasureScale = self.resolveOfficialArcMeasureScale()
+        self.officialArcMeasureScaleResolved = officialArcMeasureScale
+        self.officialArcMeasureTransforms = self.buildOfficialArcMeasureTransforms()
         field = self.lineLayer.fields().field(self.lineRouteField)
         self.routeField = QgsField(field.name(), field.type(), field.typeName(), field.length(), field.precision())
+        if self.useCompositeRouteId or self.strictDirection:
+            self.routeField = QgsField(field.name(), QVariant.String, "string")
 
         self.progressCounts = {}
         # we don't know progressTotal at the beginning, but we can estimate it
@@ -232,11 +513,13 @@ class LrsCalib(LrsBase):
         self.progressCounts[self.NROUTES] = self.progressCounts[self.NLINES]
         self.updateProgressTotal()
 
-        self.registerLines()
+        self.registerLines(officialArcMeasureScale)
         self.registerPoints()
-        for route in self.routes.values():
+        self.detectSameArcMultiplePkDirections()
+        for route in list(self.routes.values()):
             route.calibrate(self.extrapolate)
             self.progressStep(self.CALIBRATING_ROUTES)
+            QgsApplication.processEvents()
 
             # count stats
         for route in self.routes.values():
@@ -244,15 +527,17 @@ class LrsCalib(LrsBase):
             self.stats['lengthOk'] += route.getGoodLength()
 
             # self.stats['pointsError'] = self.stats['pointsIncluded'] - self.stats['pointsOk']
+        self.stats['routes'] = len(self.routes)
+        self.countErrorStats()
+        self.logSummary()
 
     def isCalibrated(self):
         return len(self.routes) > 0
 
     # -------------------------------- register / unregister features ----------------------
 
-    def registerLineFeature(self, feature):
-        routeId = feature[self.lineRouteField]
-        if routeId == '' or routeId == NULL: routeId = None
+    def registerLineFeature(self, feature, officialArcMeasureScale=1.0):
+        routeId = self.featureRouteId(feature, self.lineRouteField)
         # debug ( "fid = %s routeId = %s" % ( feature.id(), routeId ) )
 
         if not self.routeIdSelected(routeId):
@@ -263,10 +548,48 @@ class LrsCalib(LrsBase):
             if self.lineTransform:
                 geo.transform(self.lineTransform)
 
+        codivia = featureValue(feature, self.codiviaField, feature[self.lineRouteField])
+        direccio = featureValue(feature, self.directionField, None)
+        idlrs = featureValueFromAny(feature, [self.idlrsField, self.lineFallbackIdField], None)
+        measureFrom = toFloatOrNone(featureValue(feature, self.lineMeasureFromField, None))
+        measureTo = toFloatOrNone(featureValue(feature, self.lineMeasureToField, None))
+        if measureFrom is not None:
+            measureFrom *= officialArcMeasureScale
+        if measureTo is not None:
+            measureTo *= officialArcMeasureScale
+        scale, offset = self.officialArcMeasureTransforms.get(normalizeRouteId(routeId), (1.0, 0.0))
+        if measureFrom is not None:
+            measureFrom = measureFrom * scale + offset
+        if measureTo is not None:
+            measureTo = measureTo * scale + offset
+        isRamal = isRamalCode(codivia, self.ramalSuffixes)
+
+        if routeId is None:
+            self.addDiagnostic(LrsError.ROUTE_ID_NULL, geo or QgsGeometry(), severity='ERROR',
+                               elementType='ARC', codivia=codivia, direccio=direccio, idlrs=idlrs,
+                               message='Line route id is null')
+
         route = self.getRoute(routeId)
-        line = LrsLine(feature.id(), routeId, geo)
+        line = LrsLine(feature.id(), routeId, geo, measureFrom=measureFrom,
+                       measureTo=measureTo, codivia=codivia, direccio=direccio, idlrs=idlrs, isRamal=isRamal)
         self.lines[feature.id()] = line
         route.addLine(line)
+
+        if direccio:
+            self.routeDirections[normalizeRouteId(routeId)] = direccio
+
+        if geo and self.allowSharedGeometryDirections:
+            key = self.geometrySignature(geo)
+            directions = self.lineGeometryDirections.setdefault(key, {})
+            directions.setdefault(direccio, []).append(feature.id())
+            diag_key = (key, direccio)
+            if len([d for d in directions if d is not None]) > 1 and diag_key not in self._sharedGeometryDiagnostics:
+                self._sharedGeometryDiagnostics.add(diag_key)
+                self.addDiagnostic(LrsError.SHARED_GEOMETRY_MULTIPLE_DIRECTIONS, geo, routeId=routeId,
+                                   severity='WARNING', elementType='ARC', codivia=codivia, direccio=direccio,
+                                   idlrs=idlrs,
+                                   message='Same arc geometry participates in multiple logical directions')
+
         return line
 
     def unregisterLineByFid(self, fid):
@@ -275,10 +598,11 @@ class LrsCalib(LrsBase):
         route.removeLine(fid)
         del self.lines[fid]
 
-    def registerLines(self):
+    def registerLines(self, officialArcMeasureScale=1.0):
         self.routes = {}
+        count = 0
         for feature in self.lineLayer.getFeatures():
-            line = self.registerLineFeature(feature)
+            line = self.registerLineFeature(feature, officialArcMeasureScale)
             # self.stats['lineFeatures'] += 1
             length = 0
             if feature.geometry():
@@ -289,15 +613,16 @@ class LrsCalib(LrsBase):
                 # self.stats['linesIncluded'] += line.getNumParts()
                 self.stats['lengthIncluded'] += length
             self.progressStep(self.REGISTERING_LINES)
+            count += 1
+            if count % 250 == 0:
+                QgsApplication.processEvents()
             # precise number of routes
         self.progressCounts[self.NROUTES] = len(self.routes)
         self.updateProgressTotal()
 
     # returns LrsPoint
     def registerPointFeature(self, feature):
-        routeId = feature[self.pointRouteField]
-        if routeId == '' or routeId == NULL:
-            routeId = None
+        routeId = self.featureRouteId(feature, self.pointRouteField)
 
         if not self.routeIdSelected(routeId):
             return None
@@ -313,10 +638,33 @@ class LrsCalib(LrsBase):
             if self.pointTransform:
                 geo.transform(self.pointTransform)
 
-        point = LrsPoint(feature.id(), routeId, measure, geo)
+        codivia = featureValue(feature, self.codiviaField, feature[self.pointRouteField])
+        direccio = featureValue(feature, self.directionField, None)
+        idpk = featureValue(feature, self.idpkField, None)
+
+        if routeId is None:
+            self.addDiagnostic(LrsError.ROUTE_ID_NULL, geo or QgsGeometry(), severity='ERROR',
+                               elementType='PK', codivia=codivia, direccio=direccio, idpk=idpk,
+                               message='Point route id is null')
+
+        point = LrsPoint(feature.id(), routeId, measure, geo, codivia=codivia, direccio=direccio, idpk=idpk)
         self.points[feature.id()] = point
         route = self.getRoute(routeId)
         route.addPoint(point)
+
+        if geo and self.allowSharedGeometryDirections:
+            pts = [geo.asPoint()] if QgsWkbTypes.isSingleType(geo.wkbType()) else geo.asMultiPoint()
+            for pnt in pts:
+                ph = pointHash(pnt)
+                directions = self.pointLocationDirections.setdefault(ph, {})
+                directions.setdefault(direccio, []).append(feature.id())
+                diag_key = (ph, direccio)
+                if len([d for d in directions if d is not None]) > 1 and diag_key not in self._pkLocationDiagnostics:
+                    self._pkLocationDiagnostics.add(diag_key)
+                    self.addDiagnostic(LrsError.PK_SAME_LOCATION_DIFFERENT_DIRECTION, geo, routeId=routeId,
+                                       severity='WARNING', elementType='PK', codivia=codivia, direccio=direccio,
+                                       idpk=idpk, measure=measure,
+                                       message='PKs share coordinates but belong to different directions')
         return point
 
     def unregisterPointByFid(self, fid):
@@ -326,6 +674,7 @@ class LrsCalib(LrsBase):
         del self.points[fid]
 
     def registerPoints(self):
+        count = 0
         for feature in self.pointLayer.getFeatures():
             point = self.registerPointFeature(feature)
             # self.stats['pointFeatures'] += 1
@@ -333,6 +682,9 @@ class LrsCalib(LrsBase):
             # self.stats['pointFeaturesIncluded'] += 1
             # self.stats['pointsIncluded'] += point.getNumParts()
             self.progressStep(self.REGISTERING_POINTS)
+            count += 1
+            if count % 250 == 0:
+                QgsApplication.processEvents()
             # route total may increase (e.g. orphans)
         self.progressCounts[self.NROUTES] = len(self.routes)
         self.updateProgressTotal()
@@ -487,9 +839,11 @@ class LrsCalib(LrsBase):
         fields = self.pointLayer.fields()
         routeIdx = fields.indexFromName(self.pointRouteField)
         measureIdx = fields.indexFromName(self.pointMeasureField)
+        compositeIdxs = [fields.indexFromName(name) for name in self.compositeRouteFields]
+        compositeIdxs.append(fields.indexFromName(self.directionField))
         # debug ( "routeIdx = %s measureIdx = %s" % ( routeIdx, measureIdx) )
 
-        if attIdx == routeIdx or attIdx == measureIdx:
+        if attIdx == routeIdx or attIdx == measureIdx or attIdx in compositeIdxs:
             point = self.points.get(fid)
             if point:  # was in selection
                 route = self.getRoute(point.routeId)
@@ -513,7 +867,7 @@ class LrsCalib(LrsBase):
         # debug ( "feature added fid %s" % fid )
         self.setEdited()
         feature = getLayerFeature(self.lineLayer, fid)
-        line = self.registerLineFeature(feature)  # returns LrsLine
+        line = self.registerLineFeature(feature, self.officialArcMeasureScaleResolved)  # returns LrsLine
         if not line: return  # route id not in selection
 
         route = self.getRoute(line.routeId)
@@ -545,7 +899,7 @@ class LrsCalib(LrsBase):
 
         # add new
         feature = getLayerFeature(self.lineLayer, fid)
-        self.registerLineFeature(feature)
+        self.registerLineFeature(feature, self.officialArcMeasureScaleResolved)
 
         errorUpdates = route.calibrateAndGetUpdates(self.extrapolate)
         self.emitUpdateErrors(errorUpdates)
@@ -556,9 +910,13 @@ class LrsCalib(LrsBase):
 
         fields = self.lineLayer.fields()
         routeIdx = fields.indexFromName(self.lineRouteField)
+        compositeIdxs = [fields.indexFromName(name) for name in self.compositeRouteFields]
+        compositeIdxs.append(fields.indexFromName(self.directionField))
+        compositeIdxs.append(fields.indexFromName(self.lineMeasureFromField))
+        compositeIdxs.append(fields.indexFromName(self.lineMeasureToField))
         # debug ( "routeIdx = %s" % ( routeIdx, measureIdx) )
 
-        if attIdx == routeIdx:
+        if attIdx == routeIdx or attIdx in compositeIdxs:
             line = self.lines.get(fid)
             if line:  # was in selection
                 route = self.getRoute(line.routeId)
@@ -568,7 +926,7 @@ class LrsCalib(LrsBase):
 
             feature = getLayerFeature(self.lineLayer, fid)
 
-            line = self.registerLineFeature(feature)  # returns LrsLine
+            line = self.registerLineFeature(feature, self.officialArcMeasureScaleResolved)  # returns LrsLine
             if line:  # route id in selection
                 route = self.getRoute(line.routeId)
                 errorUpdates = route.calibrateAndGetUpdates(self.extrapolate)

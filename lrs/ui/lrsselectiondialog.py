@@ -20,11 +20,16 @@
  ***************************************************************************/
 """
 
+import os
+
+from qgis.PyQt import uic
 from qgis.PyQt.QtCore import *
 from qgis.PyQt.QtWidgets import *
 from qgis.core import NULL
 
-from .ui_selectiondialog import Ui_LrsSelectionDialog
+Ui_LrsSelectionDialog, _ = uic.loadUiType(
+    os.path.join(os.path.dirname(__file__), 'ui_selectiondialog.ui')
+)
 
 
 class LrsSelectionDialog(QDialog, Ui_LrsSelectionDialog):

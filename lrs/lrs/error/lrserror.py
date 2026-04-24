@@ -44,6 +44,18 @@ class LrsError(QObject):
     DUPLICATE_REFERENCING = 11  # multiple route segments measures overlap
     PARALLEL = 12  # parallel line
     FORK_LINE = 13  # parts connected in fork
+    SHARED_GEOMETRY_MULTIPLE_DIRECTIONS = 20
+    PK_SAME_LOCATION_DIFFERENT_DIRECTION = 21
+    SAME_ARC_MULTIPLE_PK_DIRECTIONS = 22
+    RAMAL_INDEPENDENT_ROUTE = 23
+    CLOSED_RING_OR_ROUNDABOUT = 24
+    REVERSED_MEASURES = 25
+    MEASURE_ZERO_WITH_GEOMETRY = 26
+    MISSING_OFFICIAL_MEASURE = 27
+    MISSING_GEOMETRY = 28
+    EMPTY_GEOMETRY = 29
+    ROUTE_ID_NULL = 30
+    CRS_IN_DEGREES = 31
 
     def __init__(self, type, geo, **kwargs):
         super(LrsError, self).__init__()
@@ -52,6 +64,12 @@ class LrsError(QObject):
         self.message = kwargs.get('message', '')
         self.routeId = kwargs.get('routeId', None)
         self.measure = kwargs.get('measure', None)  # may be list !
+        self.severity = kwargs.get('severity', 'ERROR')
+        self.elementType = kwargs.get('elementType', '')
+        self.codivia = kwargs.get('codivia', '')
+        self.direccio = kwargs.get('direccio', '')
+        self.idlrs = kwargs.get('idlrs', '')
+        self.idpk = kwargs.get('idpk', '')
         # self.lineFid = kwargs.get('lineFid', None)
         # self.pointFid = kwargs.get('pointFid', None) # may be list !
         # multigeometry part
@@ -78,6 +96,18 @@ class LrsError(QObject):
             self.DUPLICATE_REFERENCING: self.tr('Duplicate referencing'),
             self.PARALLEL: self.tr('Parallel line'),
             self.FORK_LINE: self.tr('Fork line'),
+            self.SHARED_GEOMETRY_MULTIPLE_DIRECTIONS: self.tr('SHARED_GEOMETRY_MULTIPLE_DIRECTIONS'),
+            self.PK_SAME_LOCATION_DIFFERENT_DIRECTION: self.tr('PK_SAME_LOCATION_DIFFERENT_DIRECTION'),
+            self.SAME_ARC_MULTIPLE_PK_DIRECTIONS: self.tr('SAME_ARC_MULTIPLE_PK_DIRECTIONS'),
+            self.RAMAL_INDEPENDENT_ROUTE: self.tr('RAMAL_INDEPENDENT_ROUTE'),
+            self.CLOSED_RING_OR_ROUNDABOUT: self.tr('CLOSED_RING_OR_ROUNDABOUT'),
+            self.REVERSED_MEASURES: self.tr('REVERSED_MEASURES'),
+            self.MEASURE_ZERO_WITH_GEOMETRY: self.tr('MEASURE_ZERO_WITH_GEOMETRY'),
+            self.MISSING_OFFICIAL_MEASURE: self.tr('MISSING_OFFICIAL_MEASURE'),
+            self.MISSING_GEOMETRY: self.tr('MISSING_GEOMETRY'),
+            self.EMPTY_GEOMETRY: self.tr('EMPTY_GEOMETRY'),
+            self.ROUTE_ID_NULL: self.tr('ROUTE_ID_NULL'),
+            self.CRS_IN_DEGREES: self.tr('CRS_IN_DEGREES'),
         }
 
     def __str__(self):
@@ -159,6 +189,14 @@ class LrsError(QObject):
                 m.update(self.getOriginChecksum())
             elif self.type == self.FORK_LINE:
                 m.update(self.getOriginChecksum())
+            else:
+                m.update(str(self.routeId).encode())
+                m.update(str(self.measure).encode())
+                m.update(str(self.message).encode())
+                if self.geo:
+                    m.update(self.geo.asWkb())
+                if self.origins:
+                    m.update(self.getOriginChecksum())
 
             self.checksum_ = m.digest()
         return self.checksum_
@@ -170,4 +208,3 @@ class LrsError(QObject):
         # m = md5( s )
         # self.fullChecksum_ = m.digest()
         # return self.fullChecksum_
-

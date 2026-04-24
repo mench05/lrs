@@ -20,6 +20,7 @@
  ***************************************************************************/
 """
 import math
+import re
 import sys
 
 from PyQt5.QtCore import QVariant
@@ -68,6 +69,18 @@ def debug(msg):
     QgsMessageLog.logMessage(msg, 'LRS Plugin', Qgis.Info)
 
 
+def logInfo(msg):
+    QgsMessageLog.logMessage(msg, 'LRS Plugin', Qgis.Info)
+
+
+def logWarning(msg):
+    QgsMessageLog.logMessage(msg, 'LRS Plugin', Qgis.Warning)
+
+
+def logCritical(msg):
+    QgsMessageLog.logMessage(msg, 'LRS Plugin', Qgis.Critical)
+
+
 # compare 2 doubles
 def doubleNear(d1, d2):
     return abs(d1 - d2) < 1e-10
@@ -84,6 +97,108 @@ def normalizeRouteId(route):
                 route = int(route)
         route = str(route)
     return route.lower()
+
+
+def cleanRouteIdPart(value):
+    if value is None or value == NULL:
+        return None
+    value = str(value).strip()
+    if value == '':
+        return None
+    value = re.sub(r'[^A-Za-z0-9_\\-]+', '_', value)
+    value = re.sub(r'_+', '_', value)
+    return value.strip('_')
+
+
+def fieldExists(layer, fieldName):
+    return bool(layer and fieldName and layer.fields().indexFromName(fieldName) >= 0)
+
+
+def featureValue(feature, fieldName, default=None):
+    if not feature or not fieldName:
+        return default
+    if feature.fields().indexFromName(fieldName) < 0:
+        return default
+    value = feature[fieldName]
+    if value == NULL:
+        return default
+    return value
+
+
+def featureValueFromAny(feature, fieldNames, default=None):
+    for fieldName in fieldNames:
+        value = featureValue(feature, fieldName, None)
+        if value is not None and value != '':
+            return value
+    return default
+
+
+def buildCompositeRouteId(feature, routeFieldName=None, routeFields=None, fallbackFields=None):
+    # A route id is a logical LRS identity, not necessarily one physical geometry.
+    # CODIVIA alone is not enough for official two-way roads because Creixent and
+    # Decreixent PKs may occupy the same coordinates on the same arc.
+    fields = routeFields or []
+    parts = []
+    for fieldName in fields:
+        value = featureValue(feature, fieldName, None)
+        if value is None and fieldName == 'IDLRS':
+            value = featureValueFromAny(feature, fallbackFields or ['ID'], None)
+        value = cleanRouteIdPart(value)
+        if value is not None:
+            parts.append(value)
+
+    if parts:
+        return '_'.join(parts)
+
+    return featureValue(feature, routeFieldName, None)
+
+
+def toFloatOrNone(value):
+    if value is None or value == NULL or value == '':
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def pointNear(p1, p2, tolerance=1e-8):
+    return pointsDistance(p1, p2) <= tolerance
+
+
+def polylineClosed(polyline, tolerance=1e-8):
+    if not polyline or len(polyline) < 2:
+        return False
+    return pointNear(polyline[0], polyline[-1], tolerance)
+
+
+def isRamalCode(value, suffixes=None):
+    if value is None or value == NULL:
+        return False
+    suffixes = suffixes or [
+        '-RA', '-RB', '-RC', '-RD', '-RE', '-RF',
+        '-AR', '-BR', '-ER',
+        '-AD', '-BD', '-DB', '-DA', '-CA', '-CB', '-AC',
+        '-LD', '-LE', '-LA', '-LB', '-LC',
+        '-N1', '-N2', '-BC', '-BC1', '-BC2'
+    ]
+    value = str(value).upper()
+    suffixes = [s.upper() for s in suffixes]
+
+    # Composite route ids may look like N-340_10930-DA_Creixent. Test each
+    # logical token instead of only the final string, otherwise direction suffixes
+    # hide branch codes and short connectors are calibrated as normal mainlines.
+    tokens = re.split(r'[_/\s]+', value)
+    for token in tokens:
+        if token in ('CREIXENT', 'DECREIXENT'):
+            continue
+        if any(token.endswith(suffix) for suffix in suffixes):
+            return True
+
+    # Some official graph ids encode a short connector with a numeric subcode
+    # after the road code, e.g. M43163-033. Treat it as an independent branch
+    # candidate only when it is part of a composite/internal route id.
+    return len(tokens) > 1 and any(re.search(r'-\d{2,4}$', token) for token in tokens)
 
 
 # print measure with decent number of decimal places (meters), 
@@ -357,4 +472,3 @@ def checkFields(inputLayer, outputLayer):
         QMessageBox.information(None, 'Information',
                                 'Could not copy field %s. The type is not probably supported by memory provider, try to change field type.' % " ".join(
                                     missingFields))
-

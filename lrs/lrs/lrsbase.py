@@ -118,6 +118,7 @@ class LrsBase(QObject):
         self.partSpatialIndex = QgsSpatialIndex()
         self.partSpatialIndexRoutePart = {}
         fid = 1
+        count = 0
         for route in self.routes.values():
             for i in range(len(route.parts)):
                 feature = QgsFeature(fid)
@@ -126,6 +127,9 @@ class LrsBase(QObject):
                 self.partSpatialIndex.insertFeature(feature)
                 self.partSpatialIndexRoutePart[fid] = [route.routeId, i]
                 fid += 1
+                count += 1
+                if count % 500 == 0:
+                    QgsApplication.processEvents()
 
     # returns nearest routeId, partIdx within threshold
     def nearestRoutePart(self, point, threshold):

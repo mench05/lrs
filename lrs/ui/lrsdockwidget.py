@@ -19,7 +19,14 @@
  *                                                                         *
  ***************************************************************************/
 """
-from PyQt5.QtCore import QVariant, QCoreApplication
+import os
+
+from qgis.PyQt import uic
+from qgis.PyQt.QtCore import QVariant, QCoreApplication
+from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialogButtonBox, QDockWidget, QGridLayout,
+                                 QLabel, QLineEdit, QTableView, QWidget)
+from qgis.core import QgsApplication
 from qgis.gui import QgsHighlight
 
 from ..lrs.error.lrserrorlayermanager import LrsErrorLayerManager
@@ -41,7 +48,10 @@ from .lrslayercombomanager import LrsLayerComboManager
 from .lrsselectiondialog import *
 from .lrsunitcombomanager import LrsUnitComboManager
 from .lrswidgetmanager import *
-from .ui_lrsdockwidget import Ui_LrsDockWidget
+
+Ui_LrsDockWidget, _ = uic.loadUiType(
+    os.path.join(os.path.dirname(__file__), 'ui_lrsdockwidget.ui')
+)
 
 try:
     import psycopg2
@@ -70,8 +80,9 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.errorLineLayerManager = None
         self.qualityLayer = None
         self.qualityLayerManager = None
+        self.locateRouteGroups = {}
 
-        self.pluginDir = QFileInfo(QgsApplication.qgisUserDatabaseFilePath()).path() + "/python/plugins/lrs"
+        self.pluginDir = os.path.dirname(os.path.dirname(__file__))
 
         super(LrsDockWidget, self).__init__(parent)
 
@@ -104,11 +115,13 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
 
         # ----------------------- locateTab ---------------------------
         self.locateRouteCM = LrsComboManager(self.locateRouteCombo)
+        self.addLocateRouteFilter()
         self.locateHighlightWM = LrsWidgetManager(self.locateHighlightCheckBox, settingsName='locateHighlight',
                                                   defaultValue=True)
         self.locateBufferWM = LrsWidgetManager(self.locateBufferSpin, settingsName='locateBuffer', defaultValue=200.0)
 
         self.locateRouteCombo.currentIndexChanged.connect(self.locateRouteChanged)
+        self.locateRouteFilterLineEdit.textChanged.connect(self.resetLocateRoutes)
         self.locateMeasureSpin.valueChanged.connect(self.resetLocateEvent)
         self.locateBufferSpin.valueChanged.connect(self.locateBufferChanged)
         self.locateCenterButton.clicked.connect(self.locateCenter)
@@ -139,6 +152,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.eventsFeaturesSelectCM = LrsComboManager(self.eventsFeaturesSelectCombo, options=(
             (ALL_FEATURES, self.tr('All features')), (SELECTED_FEATURES, self.tr('Selected features'))),
                                                       defaultValue=ALL_FEATURES, settingsName='eventsFeaturesSelect')
+        self.addEventsDefaultDirectionOption()
 
         self.eventsOutputNameWM = LrsWidgetManager(self.eventsOutputNameLineEdit, settingsName='eventsOutputName',
                                                    defaultValue='LRS events')
@@ -154,6 +168,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.eventsRouteFieldCombo.currentIndexChanged.connect(self.resetEventsButtons)
         self.eventsMeasureStartFieldCombo.currentIndexChanged.connect(self.resetEventsButtons)
         self.eventsMeasureEndFieldCombo.currentIndexChanged.connect(self.resetEventsButtons)
+        self.eventsDefaultDirectionCombo.currentIndexChanged.connect(self.resetEventsButtons)
         # Offset
         self.eventsOffsetStartFieldCombo.currentIndexChanged.connect(self.resetEventsButtons)
         self.eventsOffsetEndFieldCombo.currentIndexChanged.connect(self.resetEventsButtons)
@@ -227,6 +242,8 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.genExtrapolateWM = LrsWidgetManager(self.genExtrapolateCheckBox, settingsName='extrapolate',
                                                  defaultValue=False)
 
+        self.addGenerateRobustOptions()
+
         self.genOutputNameWM = LrsWidgetManager(self.genOutputNameLineEdit, settingsName='lrsOutputName',
                                                 defaultValue='LRS')
 
@@ -236,6 +253,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.genPointLayerCombo.currentIndexChanged.connect(self.resetGenerateButtons)
         self.genPointRouteFieldCombo.currentIndexChanged.connect(self.resetGenerateButtons)
         self.genPointMeasureFieldCombo.currentIndexChanged.connect(self.resetGenerateButtons)
+        self.genCompositeRouteIdCheckBox.stateChanged.connect(self.resetGenerateButtons)
 
         self.genSelectionModeCombo.currentIndexChanged.connect(self.enableGenerateSelection)
         self.genSelectionButton.clicked.connect(self.openGenerateSelectionDialog)
@@ -306,6 +324,97 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
 
         # read project if plugin was reloaded
         self.projectRead()
+
+    def addLocateRouteFilter(self):
+        parent = self.locateRouteCombo.parentWidget()
+        layout = parent.layout() if parent else None
+        self.locateRouteFilterLabel = QLabel(self.tr('Route filter'), parent)
+        self.locateRouteFilterLineEdit = QLineEdit(parent)
+        self.locateRouteFilterLineEdit.setToolTip(self.tr('Filter available routes in the Locate list.'))
+        self.locateRouteFilterLineEdit.setPlaceholderText(self.tr('Type CODIVIA, direction or branch'))
+        if layout and isinstance(layout, QGridLayout):
+            layout.addWidget(self.locateRouteFilterLabel, 6, 0)
+            layout.addWidget(self.locateRouteFilterLineEdit, 6, 1)
+        elif layout:
+            panel = QWidget(parent)
+            panelLayout = QGridLayout(panel)
+            panelLayout.setContentsMargins(0, 0, 0, 0)
+            panelLayout.addWidget(self.locateRouteFilterLabel, 0, 0)
+            panelLayout.addWidget(self.locateRouteFilterLineEdit, 0, 1)
+            layout.addWidget(panel)
+
+    def addGenerateRobustOptions(self):
+        parent = self.genExtrapolateCheckBox.parentWidget()
+        layout = parent.layout() if parent else None
+
+        self.genCompositeRouteIdLabel = QLabel(self.tr('Composite ROUTE_ID fields'), parent)
+        self.genCompositeRouteIdLineEdit = QLineEdit(parent)
+        self.genCompositeRouteIdLineEdit.setToolTip(self.tr('Comma separated fields used as logical route id.'))
+        self.genCompositeRouteIdLineEdit.setText('CODIVIA,DIRECCIO')
+
+        self.genCompositeRouteIdCheckBox = QCheckBox(parent)
+        self.genOfficialMeasuresCheckBox = QCheckBox(parent)
+        self.genStrictDirectionCheckBox = QCheckBox(parent)
+        self.genSharedGeometryCheckBox = QCheckBox(parent)
+        self.genTolerantModeCheckBox = QCheckBox(parent)
+        self.genRamalHandlingCheckBox = QCheckBox(parent)
+        self.genRoundaboutHandlingCheckBox = QCheckBox(parent)
+        self.genDiagnosticsCheckBox = QCheckBox(parent)
+
+        robustWidgets = (
+            (self.tr('Use composite ROUTE_ID'), self.genCompositeRouteIdCheckBox),
+            (self.tr('Use official arc measures'), self.genOfficialMeasuresCheckBox),
+            (self.tr('Separate by DIRECCIO'), self.genStrictDirectionCheckBox),
+            (self.tr('Allow shared geometry by direction'), self.genSharedGeometryCheckBox),
+            (self.tr('Continue with warnings'), self.genTolerantModeCheckBox),
+            (self.tr('Treat branches as independent'), self.genRamalHandlingCheckBox),
+            (self.tr('Treat closed rings as independent'), self.genRoundaboutHandlingCheckBox),
+            (self.tr('Generate diagnostics'), self.genDiagnosticsCheckBox),
+        )
+
+        if layout and isinstance(layout, QGridLayout):
+            row = 18
+            layout.addWidget(self.genCompositeRouteIdLabel, row, 0)
+            layout.addWidget(self.genCompositeRouteIdLineEdit, row, 1)
+            row += 1
+            for labelText, widget in robustWidgets:
+                label = QLabel(labelText, parent)
+                layout.addWidget(label, row, 0)
+                layout.addWidget(widget, row, 1)
+                row += 1
+        elif layout:
+            robustPanel = QWidget(parent)
+            robustLayout = QGridLayout(robustPanel)
+            robustLayout.setContentsMargins(0, 0, 0, 0)
+            robustLayout.addWidget(self.genCompositeRouteIdLabel, 0, 0)
+            robustLayout.addWidget(self.genCompositeRouteIdLineEdit, 0, 1)
+            row = 1
+            for labelText, widget in robustWidgets:
+                label = QLabel(labelText, robustPanel)
+                robustLayout.addWidget(label, row, 0)
+                robustLayout.addWidget(widget, row, 1)
+                row += 1
+            layout.addWidget(robustPanel)
+
+        self.genCompositeRouteIdWM = LrsWidgetManager(self.genCompositeRouteIdCheckBox,
+                                                      settingsName='useCompositeRouteId', defaultValue=True)
+        self.genCompositeRouteFieldsWM = LrsWidgetManager(self.genCompositeRouteIdLineEdit,
+                                                          settingsName='compositeRouteFields',
+                                                          defaultValue='CODIVIA,DIRECCIO')
+        self.genOfficialMeasuresWM = LrsWidgetManager(self.genOfficialMeasuresCheckBox,
+                                                      settingsName='useOfficialArcMeasures', defaultValue=True)
+        self.genStrictDirectionWM = LrsWidgetManager(self.genStrictDirectionCheckBox,
+                                                     settingsName='strictDirection', defaultValue=True)
+        self.genSharedGeometryWM = LrsWidgetManager(self.genSharedGeometryCheckBox,
+                                                    settingsName='allowSharedGeometryDirections', defaultValue=True)
+        self.genTolerantModeWM = LrsWidgetManager(self.genTolerantModeCheckBox,
+                                                  settingsName='tolerantMode', defaultValue=True)
+        self.genRamalHandlingWM = LrsWidgetManager(self.genRamalHandlingCheckBox,
+                                                   settingsName='specialRamalHandling', defaultValue=True)
+        self.genRoundaboutHandlingWM = LrsWidgetManager(self.genRoundaboutHandlingCheckBox,
+                                                        settingsName='specialRoundaboutHandling', defaultValue=True)
+        self.genDiagnosticsWM = LrsWidgetManager(self.genDiagnosticsCheckBox,
+                                                 settingsName='generateDiagnostics', defaultValue=True)
 
     def lrsLayerChanged(self, layer):
         # debug("lrsLayerChanged layer: %s" % (layer.name() if layer else None))
@@ -409,12 +518,22 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         del self.genPointLayerCM
         del self.genPointRouteFieldCM
         del self.genPointMeasureFieldCM
+        del self.genCompositeRouteIdWM
+        del self.genCompositeRouteFieldsWM
+        del self.genOfficialMeasuresWM
+        del self.genStrictDirectionWM
+        del self.genSharedGeometryWM
+        del self.genTolerantModeWM
+        del self.genRamalHandlingWM
+        del self.genRoundaboutHandlingWM
+        del self.genDiagnosticsWM
         del self.errorVisualizer
 
         del self.eventsLayerCM
         del self.eventsRouteFieldCM
         del self.eventsMeasureStartFieldCM
         del self.eventsMeasureEndFieldCM
+        del self.eventsDefaultDirectionCM
         # Offset
         del self.eventsOffsetStartFieldCM
         del self.eventsOffsetEndFieldCM
@@ -514,6 +633,15 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.genSnapWM.reset()
         self.genParallelModeCM.reset()
         self.genExtrapolateWM.reset()
+        self.genCompositeRouteIdWM.reset()
+        self.genCompositeRouteFieldsWM.reset()
+        self.genOfficialMeasuresWM.reset()
+        self.genStrictDirectionWM.reset()
+        self.genSharedGeometryWM.reset()
+        self.genTolerantModeWM.reset()
+        self.genRamalHandlingWM.reset()
+        self.genRoundaboutHandlingWM.reset()
+        self.genDiagnosticsWM.reset()
         self.genOutputNameWM.reset()
 
         self.resetGenerateButtons()
@@ -541,6 +669,15 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.genSnapWM.writeToProject()
         self.genParallelModeCM.writeToProject()
         self.genExtrapolateWM.writeToProject()
+        self.genCompositeRouteIdWM.writeToProject()
+        self.genCompositeRouteFieldsWM.writeToProject()
+        self.genOfficialMeasuresWM.writeToProject()
+        self.genStrictDirectionWM.writeToProject()
+        self.genSharedGeometryWM.writeToProject()
+        self.genTolerantModeWM.writeToProject()
+        self.genRamalHandlingWM.writeToProject()
+        self.genRoundaboutHandlingWM.writeToProject()
+        self.genDiagnosticsWM.writeToProject()
         self.genOutputNameWM.writeToProject()
 
     def readGenerateOptions(self):
@@ -556,6 +693,15 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.genSnapWM.readFromProject()
         self.genParallelModeCM.readFromProject()
         self.genExtrapolateWM.readFromProject()
+        self.genCompositeRouteIdWM.readFromProject()
+        self.genCompositeRouteFieldsWM.readFromProject()
+        self.genOfficialMeasuresWM.readFromProject()
+        self.genStrictDirectionWM.readFromProject()
+        self.genSharedGeometryWM.readFromProject()
+        self.genTolerantModeWM.readFromProject()
+        self.genRamalHandlingWM.readFromProject()
+        self.genRoundaboutHandlingWM.readFromProject()
+        self.genDiagnosticsWM.readFromProject()
         self.genOutputNameWM.readFromProject()
 
     def getGenerateSelection(self):
@@ -615,6 +761,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         threshold = self.genThresholdSpin.value()
         parallelMode = self.genParallelModeCM.value()
         extrapolate = self.genExtrapolateCheckBox.isChecked()
+        compositeRouteFields = self.genCompositeRouteIdLineEdit.text()
 
         # self.mapUnitsPerMeasureUnit = self.genMapUnitsPerMeasureUnitSpin.value()
         measureUnit = self.genMeasureUnitCM.unit()
@@ -623,7 +770,16 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
                             self.genPointLayerCM.getLayer(), self.genPointRouteFieldCM.getFieldName(),
                             self.genPointMeasureFieldCM.getFieldName(), selectionMode=self.genSelectionModeCM.value(),
                             selection=selection, crs=crs, snap=snap, threshold=threshold, parallelMode=parallelMode,
-                            extrapolate=extrapolate, measureUnit=measureUnit)
+                            extrapolate=extrapolate, measureUnit=measureUnit,
+                            useCompositeRouteId=self.genCompositeRouteIdCheckBox.isChecked(),
+                            compositeRouteFields=compositeRouteFields,
+                            useOfficialArcMeasures=self.genOfficialMeasuresCheckBox.isChecked(),
+                            strictDirection=self.genStrictDirectionCheckBox.isChecked(),
+                            allowSharedGeometryDirections=self.genSharedGeometryCheckBox.isChecked(),
+                            tolerantMode=self.genTolerantModeCheckBox.isChecked(),
+                            specialRamalHandling=self.genRamalHandlingCheckBox.isChecked(),
+                            specialRoundaboutHandling=self.genRoundaboutHandlingCheckBox.isChecked(),
+                            generateDiagnostics=self.genDiagnosticsCheckBox.isChecked())
 
         self.genProgressLabel.setText("Writing features")
         self.lrs.progressChanged.connect(self.showGenProgress)
@@ -827,23 +983,84 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
 
     def resetLocateRoutes(self):
         # debug("resetLocateRoutes lrsLayer: %s" % (self.lrsLayer if self.lrsLayer else None))
+        currentRoute = self.locateRouteCM.value() if hasattr(self, 'locateRouteCM') else None
+        routeFilter = ''
+        if hasattr(self, 'locateRouteFilterLineEdit'):
+            routeFilter = self.locateRouteFilterLineEdit.text().strip().lower()
         options = [(None, '')]
+        self.locateRouteGroups = {}
         if self.lrsLayer:
-            options.extend([(id, "%s" % id) for id in self.lrsLayer.getRouteIds()])
+            groups = {}
+            for routeId in self.lrsLayer.getRouteIds():
+                label = self.locateRouteDisplayLabel(routeId)
+                groups.setdefault(label, []).append(routeId)
+
+            for label in sorted(groups.keys()):
+                if routeFilter and routeFilter not in label.lower():
+                    continue
+                value = 'group:%s' % label
+                self.locateRouteGroups[value] = sorted(groups[label], key=lambda routeId: "%s" % routeId)
+                options.append((value, label))
         # debug("resetLocateRoutes options: %s" % options)
         self.locateRouteCM.setOptions(options)
+        if currentRoute is not None:
+            idx = self.locateRouteCombo.findData(currentRoute, Qt.UserRole)
+            if idx >= 0:
+                self.locateRouteCombo.setCurrentIndex(idx)
+
+    def locateRouteDisplayLabel(self, routeId):
+        text = "%s" % routeId
+        parts = [p for p in text.split('_') if p]
+        direction = None
+        directionIndex = None
+        for i in range(len(parts) - 1, -1, -1):
+            part = parts[i]
+            if part.lower() in ('creixent', 'decreixent'):
+                direction = part
+                directionIndex = i
+                break
+
+        roadParts = parts[:directionIndex] if directionIndex is not None else parts
+        road = "/".join(roadParts) if roadParts else text
+        # Preserve the official logical road/subroad code. C-17 and
+        # C-17LD/510-CA are different routes and must not be merged in Locate.
+        if direction:
+            return "%s %s" % (road, direction)
+        return road
+
+    def locateSelectedRouteIds(self):
+        routeValue = self.locateRouteCM.value()
+        if routeValue is None:
+            return []
+        return self.locateRouteGroups.get(routeValue, [routeValue])
+
+    def mergeMeasureRanges(self, ranges):
+        if not ranges:
+            return []
+        ranges = [[min(r[0], r[1]), max(r[0], r[1])] for r in ranges]
+        ranges.sort()
+        merged = [ranges[0]]
+        for start, end in ranges[1:]:
+            last = merged[-1]
+            if start <= last[1]:
+                last[1] = max(last[1], end)
+            else:
+                merged.append([start, end])
+        return merged
 
     def locateRouteChanged(self):
         # #debug ('locateRouteChanged')
         rangesText = ''
-        routeId = self.locateRouteCM.value()
-        if self.lrsLayer and routeId is not None:
+        routeIds = self.locateSelectedRouteIds()
+        if self.lrsLayer and routeIds:
             ranges = []
-            for r in self.lrsLayer.getRouteMeasureRanges(routeId):
-                rang = "%s-%s" % (
-                    formatMeasure(r[0], self.lrsLayer.measureUnit), formatMeasure(r[1], self.lrsLayer.measureUnit))
-                ranges.append(rang)
-            rangesText = ", ".join(ranges)
+            for routeId in routeIds:
+                ranges.extend(self.lrsLayer.getRouteMeasureRanges(routeId))
+            rangeLabels = []
+            for r in self.mergeMeasureRanges(ranges):
+                rangeLabels.append("%s-%s" % (
+                    formatMeasure(r[0], self.lrsLayer.measureUnit), formatMeasure(r[1], self.lrsLayer.measureUnit)))
+            rangesText = ", ".join(rangeLabels)
         # #debug ('ranges: %s' % rangesText )
         self.locateRanges.setText(rangesText)
 
@@ -854,12 +1071,16 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
 
     def resetLocateEvent(self):
         self.clearLocateHighlight()
-        routeId = self.locateRouteCM.value()
+        routeIds = self.locateSelectedRouteIds()
         measure = self.locateMeasureSpin.value()
         coordinates = ''
         point = None
-        if routeId is not None:
-            point, error = self.lrsLayer.eventPointXY(routeId, measure)
+        if routeIds:
+            error = None
+            for routeId in routeIds:
+                point, error = self.lrsLayer.eventPointXY(routeId, measure)
+                if point:
+                    break
 
             if point:
                 mapSettings = self.iface.mapCanvas().mapSettings()
@@ -930,11 +1151,29 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
 
     # ---------------------------------- EVENTS ----------------------------------
 
+    def addEventsDefaultDirectionOption(self):
+        parent = self.eventsRouteFieldCombo.parentWidget()
+        layout = parent.layout() if parent else None
+        self.eventsDefaultDirectionLabel = QLabel(self.tr('Default direction'), parent)
+        self.eventsDefaultDirectionCombo = QComboBox(parent)
+        self.eventsDefaultDirectionCombo.setToolTip(
+            self.tr('Direction used when the events table has only the road code and no direction.'))
+        self.eventsDefaultDirectionCM = LrsComboManager(self.eventsDefaultDirectionCombo, options=(
+            (None, self.tr('None')),
+            ('Creixent', self.tr('Creixent')),
+            ('Decreixent', self.tr('Decreixent'))),
+            defaultValue=None, settingsName='eventsDefaultDirection')
+
+        if layout and isinstance(layout, QGridLayout):
+            layout.addWidget(self.eventsDefaultDirectionLabel, 2, 0)
+            layout.addWidget(self.eventsDefaultDirectionCombo, 2, 1)
+
     def resetEventsOptions(self):
         self.eventsLayerCM.reset()
         self.eventsRouteFieldCM.reset()
         self.eventsMeasureStartFieldCM.reset()
         self.eventsMeasureEndFieldCM.reset()
+        self.eventsDefaultDirectionCM.reset()
         # Offset
         self.eventsOffsetStartFieldCM.reset()
         self.eventsOffsetEndFieldCM.reset()
@@ -961,6 +1200,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.eventsRouteFieldCM.writeToProject()
         self.eventsMeasureStartFieldCM.writeToProject()
         self.eventsMeasureEndFieldCM.writeToProject()
+        self.eventsDefaultDirectionCM.writeToProject()
         # Offset
         self.eventsOffsetStartFieldCM.writeToProject()
         self.eventsOffsetEndFieldCM.writeToProject()
@@ -973,6 +1213,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.eventsRouteFieldCM.readFromProject()
         self.eventsMeasureStartFieldCM.readFromProject()
         self.eventsMeasureEndFieldCM.readFromProject()
+        self.eventsDefaultDirectionCM.readFromProject()
         # Offset
         self.eventsOffsetStartFieldCM.readFromProject()
         self.eventsOffsetEndFieldCM.readFromProject()
@@ -988,6 +1229,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         routeFieldName = self.eventsRouteFieldCM.getFieldName()
         startFieldName = self.eventsMeasureStartFieldCM.getFieldName()
         endFieldName = self.eventsMeasureEndFieldCM.getFieldName()
+        defaultDirection = self.eventsDefaultDirectionCM.value()
         # Offset
         startOffsetFieldName = self.eventsOffsetStartFieldCM.getFieldName()
         endOffsetFieldName = self.eventsOffsetEndFieldCM.getFieldName()
@@ -998,7 +1240,8 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
 
         events = LrsEvents(self.lrsLayer, self.eventsProgressBar)
         #events.create(layer, featuresSelect, routeFieldName, startFieldName, endFieldName, errorFieldName, outputName)
-        events.create(layer, featuresSelect, routeFieldName, startFieldName, endFieldName, errorFieldName, outputName, startOffsetFieldName, endOffsetFieldName)
+        events.create(layer, featuresSelect, routeFieldName, startFieldName, endFieldName, errorFieldName, outputName,
+                      startOffsetFieldName, endOffsetFieldName, defaultDirection)
 
     # ------------------- MEASURE -------------------
 

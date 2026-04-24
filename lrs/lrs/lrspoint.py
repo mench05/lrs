@@ -26,7 +26,7 @@ from .utils import *
 
 
 class LrsPoint(object):
-    def __init__(self, fid, routeId, measure, geo):
+    def __init__(self, fid, routeId, measure, geo, **kwargs):
         self.fid = fid  # point feature id
         self.routeId = routeId
         self.measure = measure
@@ -35,6 +35,10 @@ class LrsPoint(object):
         # debug ( "routeId = %s %s measure = %s %s" % (routeId, type(routeId), measure, type(measure) ) )
         # original feature geo, may be multipart
         self.geo = QgsGeometry(geo)  # store copy of QgsGeometry
+        self.attrs = kwargs.get('attrs', {})
+        self.codivia = kwargs.get('codivia')
+        self.direccio = kwargs.get('direccio')
+        self.idpk = kwargs.get('idpk')
 
     def getNumParts(self):
         if not self.geo: return 0

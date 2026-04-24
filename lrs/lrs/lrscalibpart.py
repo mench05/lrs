@@ -29,7 +29,7 @@ from .lrssegment import LrsSegment
 # Route part loaded from LRS layer
 # Chain of connected geometries for calibration
 class LrsCalibPart(LrsPartBase):
-    def __init__(self, polyline, routeId, origins, crs, measureUnit, distanceArea):
+    def __init__(self, polyline, routeId, origins, crs, measureUnit, distanceArea, **kwargs):
         # debug ('init route part' )
         super(LrsCalibPart, self).__init__()
         self.setPolyline(polyline)
@@ -41,6 +41,7 @@ class LrsCalibPart(LrsPartBase):
         self.milestones = []  # LrsMilestone list, all input milestones
         self.goodMilestones = []  # milestones ok, used for LRS
         self.errors = []  # LrsError list
+        self.allowSingleMilestone = kwargs.get('allowSingleMilestone', False)
 
     def setPolyline(self, polyline):
         self.polyline = polyline
@@ -55,6 +56,9 @@ class LrsCalibPart(LrsPartBase):
         # debug ( 'calibrate part routeId = %s' % self.routeId )
 
         if len(self.milestones) < 2:
+            if len(self.milestones) == 1 and self.allowSingleMilestone:
+                self.calibrateSingleMilestone()
+                return
             self.errors.append(
                 LrsError(LrsError.NOT_ENOUGH_MILESTONES, self.polylineGeo, routeId=self.routeId, origins=self.origins))
             return
@@ -152,6 +156,31 @@ class LrsCalibPart(LrsPartBase):
             if doubleNear(m1.measure, m2.measure): continue
             if doubleNear(m1.partMeasure, m2.partMeasure): continue
             self.records.append(LrsRecord(m1.measure, m2.measure, m1.partMeasure, m2.partMeasure))
+
+    def calibrateSingleMilestone(self):
+        # Short ramps/connectors can be valid LRS pieces with one official PK at
+        # the start or end. In tolerant mode we anchor the piece on that PK and
+        # extend measures by geometry length, without modifying the source data.
+        milestone = self.milestones[0]
+        self.goodMilestones = [milestone]
+
+        origin = LrsOrigin(QgsWkbTypes.LineGeometry, self.origins[0].fid,
+                           self.origins[0].geoPart, self.origins[0].nGeoParts) if self.origins else None
+        self.errors.append(LrsError(
+            LrsError.NOT_ENOUGH_MILESTONES, self.polylineGeo, routeId=self.routeId,
+            measure=milestone.measure, origins=[origin] if origin else self.origins,
+            severity='WARNING',
+            message='Single PK branch calibrated by extrapolating along geometry length'))
+
+        if milestone.partMeasure > 0 and not doubleNear(milestone.partMeasure, 0.0):
+            length = self.segmentLengthInMeasureUnits(0, milestone.partMeasure)
+            measureFrom = milestone.measure - length
+            self.records.append(LrsRecord(measureFrom, milestone.measure, 0, milestone.partMeasure))
+
+        if milestone.partMeasure < self.length and not doubleNear(milestone.partMeasure, self.length):
+            length = self.segmentLengthInMeasureUnits(milestone.partMeasure, self.length)
+            measureTo = milestone.measure + length
+            self.records.append(LrsRecord(milestone.measure, measureTo, milestone.partMeasure, self.length))
 
     # calculate segment measure in measure units, used for extrapolate
     def segmentLengthInMeasureUnits(self, partFrom, partTo):

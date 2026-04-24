@@ -31,12 +31,13 @@ class LrsEvents(QObject):
         # self.iface = iface
         self.lrs = lrs  # Lrs object
         self.progressBar = progressBar
+        self._routeIds = None
 
     @staticmethod
     def is_null(value):
         return value is None or (isinstance(value, QVariant) and value.isNull())
 
-    def create(self, layer, featuresSelect, routeFieldName, startFieldName, endFieldName, errorFieldName, outputName, startOffsetFieldName=None, endOffsetFieldName=None):
+    def create(self, layer, featuresSelect, routeFieldName, startFieldName, endFieldName, errorFieldName, outputName, startOffsetFieldName=None, endOffsetFieldName=None, defaultDirection=None):
         # create new layer
         geometryType = "MultiLineString" if endFieldName else "Point"
         uri = geometryType
@@ -82,6 +83,7 @@ class LrsEvents(QObject):
         eventTolerance = 0.0001
 
         outputFeatures = []
+        batchSize = 500
         fields = outputLayer.fields()
         #debug("create featuresSelect = %s" % featuresSelect)
         if featuresSelect == SELECTED_FEATURES:
@@ -90,10 +92,14 @@ class LrsEvents(QObject):
         else:
             featuresIterator = layer.getFeatures()
             total = layer.featureCount()
+        if total <= 0:
+            total = 1
         count = 0
+        self._routeIds = self.lrs.getRouteIds() if hasattr(self.lrs, 'getRouteIds') else []
         for feature in featuresIterator:
             # debug("create feature.id = %s" % feature.id())
             routeId = feature[routeFieldName]
+            routeId = self.resolveRouteId(routeId, defaultDirection)
             start = feature[startFieldName]
             end = feature[endFieldName] if endFieldName else None
             # Some special (HTML?) characters like "<" were breaking output in console -> escape()
@@ -130,15 +136,68 @@ class LrsEvents(QObject):
                 outputFeature[errorFieldName] = error
 
             outputFeatures.append(outputFeature)
+            if len(outputFeatures) >= batchSize:
+                outputLayer.dataProvider().addFeatures(outputFeatures)
+                outputFeatures = []
+                QgsApplication.processEvents()
 
             count += 1
             percent = 100 * count / total
             if self.progressBar:
                 self.progressBar.setValue(int(percent))
+            if count % 100 == 0:
+                QgsApplication.processEvents()
 
-        outputLayer.dataProvider().addFeatures(outputFeatures)
+        if outputFeatures:
+            outputLayer.dataProvider().addFeatures(outputFeatures)
 
         QgsProject.instance().addMapLayers([outputLayer, ])
 
         if self.progressBar:
             self.progressBar.hide()
+
+    def resolveRouteId(self, routeId, defaultDirection=None):
+        if self.lrs.getRouteIfExists(routeId):
+            return routeId
+        if not defaultDirection:
+            return routeId
+        if routeId is None:
+            return routeId
+
+        routeText = str(routeId).strip()
+        if not routeText:
+            return routeId
+
+        lowerText = routeText.lower()
+        if 'creixent' in lowerText or 'decreixent' in lowerText:
+            return routeId
+
+        candidates = []
+        for base in (routeText, cleanRouteIdPart(routeText)):
+            if not base:
+                continue
+            candidates.append('%s_%s' % (base, defaultDirection))
+            candidates.append('%s %s' % (base, defaultDirection))
+
+        for candidate in candidates:
+            if self.lrs.getRouteIfExists(candidate):
+                return candidate
+
+        matching = []
+        routeIds = self._routeIds
+        if routeIds is None and hasattr(self.lrs, 'getRouteIds'):
+            routeIds = self.lrs.getRouteIds()
+        if routeIds:
+            base = normalizeRouteId(cleanRouteIdPart(routeText) or routeText)
+            direction = normalizeRouteId(defaultDirection)
+            for candidate in routeIds:
+                normalized = normalizeRouteId(candidate)
+                if normalized.startswith('%s_' % base) and normalized.endswith('_%s' % direction):
+                    matching.append(candidate)
+                elif normalized.startswith('%s_' % base) and ('_%s_' % direction) in normalized:
+                    matching.append(candidate)
+
+        if len(matching) == 1:
+            return matching[0]
+
+        return routeId

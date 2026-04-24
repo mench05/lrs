@@ -45,10 +45,14 @@ class LrsRecord:
     # returns true if measure is within open interval (milestoneFrom,milestoneTo)
     # i.e. milestoneFrom < measure < milestoneTo
     def measureWithin(self, measure):
-        return self.milestoneFrom < measure < self.milestoneTo
+        mn = min(self.milestoneFrom, self.milestoneTo)
+        mx = max(self.milestoneFrom, self.milestoneTo)
+        return mn < measure < mx
 
     def containsMeasure(self, measure):
-        return self.milestoneFrom <= measure <= self.milestoneTo
+        mn = min(self.milestoneFrom, self.milestoneTo)
+        mx = max(self.milestoneFrom, self.milestoneTo)
+        return mn <= measure <= mx
 
     def partMeasureWithin(self, measure):
         return self.partFrom < measure < self.partTo
@@ -74,6 +78,8 @@ class LrsRecord:
     def measure(self, partMeasure):
         md = self.milestoneTo - self.milestoneFrom
         pd = self.partTo - self.partFrom
+        if pd == 0:
+            return None
         k = (partMeasure - self.partFrom) / pd
         return self.milestoneFrom + k * md
 
@@ -81,6 +87,8 @@ class LrsRecord:
     def partMeasure(self, measure):
         md = self.milestoneTo - self.milestoneFrom
         pd = self.partTo - self.partFrom
+        if md == 0:
+            return None
         k = (measure - self.milestoneFrom) / md
         return self.partFrom + k * pd
 

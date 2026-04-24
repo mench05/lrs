@@ -24,12 +24,16 @@ from PyQt5.QtCore import QAbstractTableModel, Qt, QModelIndex
 
 class LrsErrorModel(QAbstractTableModel):
     TYPE_COL = 0
-    ROUTE_COL = 1
-    MEASURE_COL = 2
-    MESSAGE_COL = 3  # currently not used
+    SEVERITY_COL = 1
+    ELEMENT_COL = 2
+    ROUTE_COL = 3
+    MEASURE_COL = 4
+    MESSAGE_COL = 5
 
     headerLabels = {
         TYPE_COL: 'Type',
+        SEVERITY_COL: 'Severity',
+        ELEMENT_COL: 'Element',
         ROUTE_COL: 'Route',
         MEASURE_COL: 'Measure',
         MESSAGE_COL: 'Message',
@@ -53,7 +57,7 @@ class LrsErrorModel(QAbstractTableModel):
         return len(self.errors)
 
     def columnCount(self, index):
-        return 3
+        return 6
 
     def data(self, index, role):
         if role != Qt.DisplayRole: return None
@@ -65,6 +69,10 @@ class LrsErrorModel(QAbstractTableModel):
         value = ""
         if col == self.TYPE_COL:
             value = error.typeLabel()
+        elif col == self.SEVERITY_COL:
+            value = error.severity
+        elif col == self.ELEMENT_COL:
+            value = error.elementType
         elif col == self.ROUTE_COL:
             value = "%s" % error.routeId
         elif col == self.MEASURE_COL:
@@ -111,7 +119,7 @@ class LrsErrorModel(QAbstractTableModel):
             # debug ( 'update row %s' % idx )
             self.errors[idx] = error
             topLeft = self.createIndex(idx, 0)
-            bottomRight = self.createIndex(idx, 3)
+            bottomRight = self.createIndex(idx, 5)
             self.dataChanged.emit(topLeft, bottomRight)
 
         for error in errorUpdates['addedErrors']:

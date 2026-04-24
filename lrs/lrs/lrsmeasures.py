@@ -66,8 +66,11 @@ class LrsMeasures(QObject):
         # outputLayer.commitChanges()
 
         outputFeatures = []
+        batchSize = 500
         fields = outputLayer.fields()
         total = layer.featureCount()
+        if total <= 0:
+            total = 1
         count = 0
         transform = None
         if layer.crs() != self.lrs.crs:
@@ -116,12 +119,19 @@ class LrsMeasures(QObject):
                 outputFeature[measureFieldName] = measure
 
                 outputFeatures.append(outputFeature)
+                if len(outputFeatures) >= batchSize:
+                    outputLayer.dataProvider().addFeatures(outputFeatures)
+                    outputFeatures = []
+                    QgsApplication.processEvents()
 
             count += 1
             percent = 100 * count / total
             self.progressBar.setValue(int(percent))
+            if count % 100 == 0:
+                QgsApplication.processEvents()
 
-        outputLayer.dataProvider().addFeatures(outputFeatures)
+        if outputFeatures:
+            outputLayer.dataProvider().addFeatures(outputFeatures)
 
         QgsProject.instance().addMapLayers([outputLayer, ])
 

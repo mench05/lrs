@@ -29,8 +29,15 @@ class LrsErrorFields(QgsFields):
 
         fields = [
             QgsField('error', QVariant.String, "string"),  # error type, avoid 'type' which could be keyword
+            QgsField('severity', QVariant.String, "string"),
+            QgsField('element', QVariant.String, "string"),
             QgsField('route', QVariant.String, "string"),
             QgsField('measure', QVariant.String, "string"),
+            QgsField('codivia', QVariant.String, "string"),
+            QgsField('direccio', QVariant.String, "string"),
+            QgsField('idlrs', QVariant.String, "string"),
+            QgsField('idpk', QVariant.String, "string"),
+            QgsField('message', QVariant.String, "string"),
         ]
 
         for field in fields:

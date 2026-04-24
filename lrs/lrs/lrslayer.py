@@ -45,6 +45,8 @@ class LrsLayer(LrsBase):
         if not self.routeFieldName:
             return
         total = self.layer.featureCount()
+        if total <= 0:
+            total = 1
         count = 0
         for feature in self.layer.getFeatures():
             # sleep(1)  # progress debug
@@ -66,6 +68,8 @@ class LrsLayer(LrsBase):
             percent = 100 * count / total;
             if progressFunction:
                 progressFunction(percent)
+            if count % 250 == 0:
+                QgsApplication.processEvents()
 
         for route in self.routes.values():
             route.checkPartOverlaps()
@@ -89,4 +93,3 @@ class LrsLayer(LrsBase):
         ids = list(ids)
         ids.sort()
         return ids
-

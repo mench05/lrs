@@ -57,13 +57,19 @@ class LrsOutput(QObject):
 
         outputLayer = QgsVectorLayer(uri, outputName, 'memory')
         outputFeatures = []
+        batchSize = 500
 
-        total = len(self.lrs.getParts())
+        parts = self.lrs.getParts()
+        total = len(parts)
+        if total <= 0:
+            total = 1
         count = 0
-        for part in self.lrs.getParts():
+        for part in parts:
             percent = 100 * count / total
             self.showProgressFunction("Exporting features", percent)
             count += 1
+            if count % 100 == 0:
+                QgsApplication.processEvents()
             if not part.records:
                 continue
             geo = part.getGeometryWithMeasures()
@@ -82,7 +88,12 @@ class LrsOutput(QObject):
             outputFeature["m_to"] = part.milestoneMeasureTo()
 
             outputFeatures.append(outputFeature)
+            if len(outputFeatures) >= batchSize:
+                outputLayer.dataProvider().addFeatures(outputFeatures)
+                outputFeatures = []
+                QgsApplication.processEvents()
 
-        outputLayer.dataProvider().addFeatures(outputFeatures)
+        if outputFeatures:
+            outputLayer.dataProvider().addFeatures(outputFeatures)
 
         QgsProject.instance().addMapLayers([outputLayer, ])

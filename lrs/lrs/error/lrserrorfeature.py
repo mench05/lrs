@@ -32,8 +32,15 @@ class LrsErrorFeature(LrsFeature):
 
         values = {
             'error': error.typeLabel(),
+            'severity': error.severity,
+            'element': error.elementType,
             'route': '%s' % error.routeId,
-            'measure': error.getMeasureString()
+            'measure': error.getMeasureString(),
+            'codivia': '%s' % error.codivia,
+            'direccio': '%s' % error.direccio,
+            'idlrs': '%s' % error.idlrs,
+            'idpk': '%s' % error.idpk,
+            'message': error.message,
         }
         for name, value in values.items():
             self.setAttribute(name, value)
