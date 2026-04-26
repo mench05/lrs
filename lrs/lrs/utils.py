@@ -125,6 +125,15 @@ def featureValue(feature, fieldName, default=None):
     return value
 
 
+def featureValueByIndex(feature, fieldIdx, default=None):
+    if feature is None or fieldIdx is None or fieldIdx < 0:
+        return default
+    value = feature[fieldIdx]
+    if value == NULL:
+        return default
+    return value
+
+
 def featureValueFromAny(feature, fieldNames, default=None):
     for fieldName in fieldNames:
         value = featureValue(feature, fieldName, None)
@@ -151,6 +160,26 @@ def buildCompositeRouteId(feature, routeFieldName=None, routeFields=None, fallba
         return '_'.join(parts)
 
     return featureValue(feature, routeFieldName, None)
+
+
+def buildCompositeRouteIdFromIndexes(feature, fieldIndexes, routeFieldName=None, routeFields=None, fallbackFields=None):
+    fields = routeFields or []
+    parts = []
+    for fieldName in fields:
+        value = featureValueByIndex(feature, fieldIndexes.get(fieldName, -1), None)
+        if value is None and fieldName == 'IDLRS':
+            for fallbackField in (fallbackFields or ['ID']):
+                value = featureValueByIndex(feature, fieldIndexes.get(fallbackField, -1), None)
+                if value is not None and value != '':
+                    break
+        value = cleanRouteIdPart(value)
+        if value is not None:
+            parts.append(value)
+
+    if parts:
+        return '_'.join(parts)
+
+    return featureValueByIndex(feature, fieldIndexes.get(routeFieldName, -1), None)
 
 
 def toFloatOrNone(value):

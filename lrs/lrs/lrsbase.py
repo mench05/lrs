@@ -133,30 +133,37 @@ class LrsBase(QObject):
 
     # returns nearest routeId, partIdx within threshold
     def nearestRoutePart(self, point, threshold):
+        result = self.nearestRoutePartMeasure(point, threshold)
+        if result:
+            return result[0], result[1]
+        return None, None
+
+    def nearestRoutePartMeasure(self, point, threshold, routeIds=None):
         if not self.partSpatialIndex:
             self.createPartSpatialIndex()
         rect = QgsRectangle(point.x() - threshold, point.y() - threshold, point.x() + threshold, point.y() + threshold)
         ids = self.partSpatialIndex.intersects(rect)
-        # debug ( '%s' % ids )
-        nearestRouteId = None
-        nearestPartIdx = None
-        nearestDist = sys.float_info.max
+        routeFilter = set(normalizeRouteId(routeId) for routeId in routeIds) if routeIds else None
+        candidates = []
         for id in ids:
             routeId, partIdx = self.partSpatialIndexRoutePart[id]
+            if routeFilter and normalizeRouteId(routeId) not in routeFilter:
+                continue
             route = self.getRoute(routeId)
             part = route.parts[partIdx]
             geo = QgsGeometry.fromPolylineXY(part.polyline)
             (sqDist, nearestPnt, afterVertex, leftOf) = geo.closestSegmentWithContext(point, 0)
             dist = math.sqrt(sqDist)
-            if dist < nearestDist:
-                nearestDist = dist
-                nearestRouteId = routeId
-                nearestPartIdx = partIdx
+            if dist <= threshold:
+                candidates.append((dist, routeId, partIdx, part))
 
-        if nearestDist <= threshold:
-            return nearestRouteId, nearestPartIdx
+        candidates.sort(key=lambda candidate: candidate[0])
+        for dist, routeId, partIdx, part in candidates:
+            measure = part.pointMeasure(point)
+            if measure is not None:
+                return routeId, partIdx, measure, dist
 
-        return None, None
+        return None
 
     # return routeId, measure
     # Note: it may happen that nearest point (projected) has no record on part,
@@ -165,12 +172,14 @@ class LrsBase(QObject):
     # TODO: search for nearest available referenced segments (records) instead
     # of part polylines?
     def pointMeasure(self, point, threshold):
-        routeId, partIdx = self.nearestRoutePart(point, threshold)
-        if routeId is not None and partIdx is not None:
-            route = self.getRoute(routeId)
-            part = route.parts[partIdx]
-            measure = part.pointMeasure(point)
-            if measure is not None:
-                return routeId, measure
+        result = self.nearestRoutePartMeasure(point, threshold)
+        if result:
+            return result[0], result[2]
 
-        return routeId, None
+        return None, None
+
+    def pointMeasureForRoutes(self, point, threshold, routeIds=None):
+        result = self.nearestRoutePartMeasure(point, threshold, routeIds)
+        if result:
+            return result[0], result[2], result[3]
+        return None, None, None

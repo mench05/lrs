@@ -133,6 +133,8 @@ class LrsCalib(LrsBase):
         self.routeDirections = {}
         self._sharedGeometryDiagnostics = set()
         self._pkLocationDiagnostics = set()
+        self.lineFieldIndexes = {}
+        self.pointFieldIndexes = {}
 
         self.progressCounts = {}
 
@@ -255,15 +257,32 @@ class LrsCalib(LrsBase):
             round(geo.length(), 6)
         )
 
-    def featureRouteId(self, feature, routeFieldName):
+    def buildFieldIndexes(self, layer, fieldNames):
+        indexes = {}
+        if not layer:
+            return indexes
+        fields = layer.fields()
+        for fieldName in fieldNames:
+            if fieldName and fieldName not in indexes:
+                indexes[fieldName] = fields.indexFromName(fieldName)
+        return indexes
+
+    def featureRouteId(self, feature, routeFieldName, fieldIndexes=None):
         if self.useCompositeRouteId:
-            routeId = buildCompositeRouteId(feature, routeFieldName,
-                                            self.compositeRouteFields,
-                                            [self.lineFallbackIdField, 'ID'])
+            if fieldIndexes:
+                routeId = buildCompositeRouteIdFromIndexes(feature, fieldIndexes, routeFieldName,
+                                                           self.compositeRouteFields,
+                                                           [self.lineFallbackIdField, 'ID'])
+            else:
+                routeId = buildCompositeRouteId(feature, routeFieldName,
+                                                self.compositeRouteFields,
+                                                [self.lineFallbackIdField, 'ID'])
         else:
-            routeId = feature[routeFieldName]
+            routeId = featureValueByIndex(feature, fieldIndexes.get(routeFieldName, -1), None) if fieldIndexes else feature[routeFieldName]
             if self.strictDirection:
-                direction = cleanRouteIdPart(featureValue(feature, self.directionField, None))
+                direction = cleanRouteIdPart(
+                    featureValueByIndex(feature, fieldIndexes.get(self.directionField, -1), None)
+                    if fieldIndexes else featureValue(feature, self.directionField, None))
                 base = cleanRouteIdPart(routeId)
                 if base and direction:
                     routeId = '%s_%s' % (base, direction)
@@ -385,11 +404,13 @@ class LrsCalib(LrsBase):
 
         pairsByRoute = {}
         for feature in self.pointLayer.getFeatures():
-            routeId = self.featureRouteId(feature, self.pointRouteField)
+            routeId = self.featureRouteId(feature, self.pointRouteField, self.pointFieldIndexes)
             if routeId is None:
                 continue
-            selectedMeasure = toFloatOrNone(featureValue(feature, self.pointMeasureField, None))
-            positionMeasure = toFloatOrNone(featureValue(feature, self.positionPkField, None))
+            selectedMeasure = toFloatOrNone(
+                featureValueByIndex(feature, self.pointFieldIndexes.get(self.pointMeasureField, -1), None))
+            positionMeasure = toFloatOrNone(
+                featureValueByIndex(feature, self.pointFieldIndexes.get(self.positionPkField, -1), None))
             if selectedMeasure is None or positionMeasure is None:
                 continue
             pairsByRoute.setdefault(normalizeRouteId(routeId), []).append((positionMeasure, selectedMeasure))
@@ -477,6 +498,14 @@ class LrsCalib(LrsBase):
         self._pkLocationDiagnostics = set()
         self._sameArcDirectionDiagnostics = set()
         self.officialArcMeasureTransforms = {}
+        self.lineFieldIndexes = self.buildFieldIndexes(
+            self.lineLayer,
+            [self.lineRouteField, self.codiviaField, self.directionField, self.idlrsField,
+             self.lineFallbackIdField, self.lineMeasureFromField, self.lineMeasureToField])
+        self.pointFieldIndexes = self.buildFieldIndexes(
+            self.pointLayer,
+            [self.pointRouteField, self.pointMeasureField, self.codiviaField, self.directionField,
+             self.idpkField, self.positionPkField, self.lineFallbackIdField])
 
         self.stats = {}
         for s in self.statsNames:
@@ -537,7 +566,7 @@ class LrsCalib(LrsBase):
     # -------------------------------- register / unregister features ----------------------
 
     def registerLineFeature(self, feature, officialArcMeasureScale=1.0):
-        routeId = self.featureRouteId(feature, self.lineRouteField)
+        routeId = self.featureRouteId(feature, self.lineRouteField, self.lineFieldIndexes)
         # debug ( "fid = %s routeId = %s" % ( feature.id(), routeId ) )
 
         if not self.routeIdSelected(routeId):
@@ -548,11 +577,14 @@ class LrsCalib(LrsBase):
             if self.lineTransform:
                 geo.transform(self.lineTransform)
 
-        codivia = featureValue(feature, self.codiviaField, feature[self.lineRouteField])
-        direccio = featureValue(feature, self.directionField, None)
-        idlrs = featureValueFromAny(feature, [self.idlrsField, self.lineFallbackIdField], None)
-        measureFrom = toFloatOrNone(featureValue(feature, self.lineMeasureFromField, None))
-        measureTo = toFloatOrNone(featureValue(feature, self.lineMeasureToField, None))
+        routeFallback = featureValueByIndex(feature, self.lineFieldIndexes.get(self.lineRouteField, -1), None)
+        codivia = featureValueByIndex(feature, self.lineFieldIndexes.get(self.codiviaField, -1), routeFallback)
+        direccio = featureValueByIndex(feature, self.lineFieldIndexes.get(self.directionField, -1), None)
+        idlrs = featureValueByIndex(feature, self.lineFieldIndexes.get(self.idlrsField, -1), None)
+        if idlrs is None or idlrs == '':
+            idlrs = featureValueByIndex(feature, self.lineFieldIndexes.get(self.lineFallbackIdField, -1), None)
+        measureFrom = toFloatOrNone(featureValueByIndex(feature, self.lineFieldIndexes.get(self.lineMeasureFromField, -1), None))
+        measureTo = toFloatOrNone(featureValueByIndex(feature, self.lineFieldIndexes.get(self.lineMeasureToField, -1), None))
         if measureFrom is not None:
             measureFrom *= officialArcMeasureScale
         if measureTo is not None:
@@ -622,13 +654,12 @@ class LrsCalib(LrsBase):
 
     # returns LrsPoint
     def registerPointFeature(self, feature):
-        routeId = self.featureRouteId(feature, self.pointRouteField)
+        routeId = self.featureRouteId(feature, self.pointRouteField, self.pointFieldIndexes)
 
         if not self.routeIdSelected(routeId):
             return None
 
-        measure = feature[self.pointMeasureField]
-        if measure == NULL: measure = None
+        measure = featureValueByIndex(feature, self.pointFieldIndexes.get(self.pointMeasureField, -1), None)
         if measure is not None:
             # convert to float to don't care later about operations with integers
             measure = float(measure)
@@ -638,9 +669,10 @@ class LrsCalib(LrsBase):
             if self.pointTransform:
                 geo.transform(self.pointTransform)
 
-        codivia = featureValue(feature, self.codiviaField, feature[self.pointRouteField])
-        direccio = featureValue(feature, self.directionField, None)
-        idpk = featureValue(feature, self.idpkField, None)
+        routeFallback = featureValueByIndex(feature, self.pointFieldIndexes.get(self.pointRouteField, -1), None)
+        codivia = featureValueByIndex(feature, self.pointFieldIndexes.get(self.codiviaField, -1), routeFallback)
+        direccio = featureValueByIndex(feature, self.pointFieldIndexes.get(self.directionField, -1), None)
+        idpk = featureValueByIndex(feature, self.pointFieldIndexes.get(self.idpkField, -1), None)
 
         if routeId is None:
             self.addDiagnostic(LrsError.ROUTE_ID_NULL, geo or QgsGeometry(), severity='ERROR',

@@ -25,9 +25,9 @@ from qgis.PyQt import uic
 from qgis.PyQt.QtCore import QVariant, QCoreApplication
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialogButtonBox, QDockWidget, QGridLayout,
-                                 QLabel, QLineEdit, QTableView, QWidget)
+                                 QLabel, QLineEdit, QPushButton, QTableView, QWidget)
 from qgis.core import QgsApplication
-from qgis.gui import QgsHighlight
+from qgis.gui import QgsHighlight, QgsMapToolEmitPoint
 
 from ..lrs.error.lrserrorlayermanager import LrsErrorLayerManager
 from ..lrs.error.lrserrorlinelayer import LrsErrorLineLayer
@@ -74,6 +74,8 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.genSelectionDialog = None
         self.locatePoint = None  # QgsPointXY
         self.locateHighlight = None  # QgsHighlight
+        self.locatePickMapTool = None
+        self.previousMapTool = None
         self.errorPointLayer = None
         self.errorPointLayerManager = None
         self.errorLineLayer = None
@@ -88,6 +90,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
 
         # Set up the user interface from Designer.
         self.setupUi(self)
+        self.translateUiToCatalan()
 
         # keep progress frame height
         self.genProgressFrame.setMinimumHeight(self.genProgressFrame.height())
@@ -116,6 +119,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         # ----------------------- locateTab ---------------------------
         self.locateRouteCM = LrsComboManager(self.locateRouteCombo)
         self.addLocateRouteFilter()
+        self.addLocatePickButton()
         self.locateHighlightWM = LrsWidgetManager(self.locateHighlightCheckBox, settingsName='locateHighlight',
                                                   defaultValue=True)
         self.locateBufferWM = LrsWidgetManager(self.locateBufferSpin, settingsName='locateBuffer', defaultValue=200.0)
@@ -127,6 +131,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.locateCenterButton.clicked.connect(self.locateCenter)
         self.locateHighlightCheckBox.stateChanged.connect(self.locateHighlightChanged)
         self.locateZoomButton.clicked.connect(self.locateZoom)
+        self.locatePickButton.clicked.connect(self.activateLocatePickTool)
         self.locateHelpButton.clicked.connect(lambda: self.showHelp('locate'))
         self.resetLocateRoutes()
         self.locateProgressBar.hide()
@@ -150,12 +155,12 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
                                                             settingsName='eventsOffsetEndField')
 
         self.eventsFeaturesSelectCM = LrsComboManager(self.eventsFeaturesSelectCombo, options=(
-            (ALL_FEATURES, self.tr('All features')), (SELECTED_FEATURES, self.tr('Selected features'))),
+            (ALL_FEATURES, self.tr('Tots els elements')), (SELECTED_FEATURES, self.tr('Elements seleccionats'))),
                                                       defaultValue=ALL_FEATURES, settingsName='eventsFeaturesSelect')
         self.addEventsDefaultDirectionOption()
 
         self.eventsOutputNameWM = LrsWidgetManager(self.eventsOutputNameLineEdit, settingsName='eventsOutputName',
-                                                   defaultValue='LRS events')
+                                                   defaultValue='Esdeveniments LRS')
         self.eventsErrorFieldWM = LrsWidgetManager(self.eventsErrorFieldLineEdit, settingsName='eventsErrorField',
                                                    defaultValue='lrs_err')
         validator = QRegExpValidator(QRegExp('[A-Za-z_][A-Za-z0-9_]+'), None)
@@ -187,7 +192,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.measureThresholdWM = LrsWidgetManager(self.measureThresholdSpin, settingsName='measureThreshold',
                                                    defaultValue=100.0)
         self.measureOutputNameWM = LrsWidgetManager(self.measureOutputNameLineEdit, settingsName='measureOutputName',
-                                                    defaultValue='LRS measure')
+                                                    defaultValue='Mesures LRS')
 
         self.measureOutputRouteFieldWM = LrsWidgetManager(self.measureOutputRouteFieldLineEdit,
                                                           settingsName='measureOutputRouteField',
@@ -229,16 +234,16 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
                                                     defaultValue=LrsUnits.KILOMETER)
 
         self.genSelectionModeCM = LrsComboManager(self.genSelectionModeCombo, options=(
-            ('all', self.tr('All routes')), ('include', self.tr('Include routes')),
-            ('exclude', self.tr('Exclude routes'))),
+            ('all', self.tr('Totes les rutes')), ('include', self.tr('Incloure rutes')),
+            ('exclude', self.tr('Excluir rutes'))),
                                                   defaultValue='all', settingsName='selectionMode')
         self.genSelectionWM = LrsWidgetManager(self.genSelectionLineEdit, settingsName='selection')
 
         self.genThresholdWM = LrsWidgetManager(self.genThresholdSpin, settingsName='threshold', defaultValue=100.0)
         self.genSnapWM = LrsWidgetManager(self.genSnapSpin, settingsName='snap', defaultValue=0.0)
         self.genParallelModeCM = LrsComboManager(self.genParallelModeCombo, options=(
-            ('error', self.tr('Mark as errors')), ('span', self.tr('Span by straight line')),
-            ('exclude', self.tr('Exclude'))), defaultValue='error', settingsName='parallelMode')
+            ('error', self.tr('Marcar com a errors')), ('span', self.tr('Unir amb línia recta')),
+            ('exclude', self.tr('Excluir'))), defaultValue='error', settingsName='parallelMode')
         self.genExtrapolateWM = LrsWidgetManager(self.genExtrapolateCheckBox, settingsName='extrapolate',
                                                  defaultValue=False)
 
@@ -325,13 +330,83 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         # read project if plugin was reloaded
         self.projectRead()
 
+    def translateUiToCatalan(self):
+        self.tabWidget.setTabText(self.tabWidget.indexOf(self.locateTab), 'Localitzar')
+        self.tabWidget.setTabText(self.tabWidget.indexOf(self.eventsTab), 'Esdeveniments')
+        self.tabWidget.setTabText(self.tabWidget.indexOf(self.measureTab), 'Mesures')
+        self.tabWidget.setTabText(self.tabWidget.indexOf(self.calibTab), 'Calibratge')
+        self.tabWidget.setTabText(self.tabWidget.indexOf(self.errorTab), 'Errors')
+
+        self.locateLrsLayerLabel.setText('Capa amb mesures')
+        self.locateLrsRouteFieldLabel.setText('Camp de ruta')
+        self.locateRouteLabel.setText('Ruta')
+        self.locateRangesLabel.setText('Mesures disponibles')
+        self.locateMeasureLabel.setText('Mesura')
+        self.locateCoordinatesLabel.setText('Coordenades')
+        self.locateHighlightLabel.setText('Ressaltar')
+        self.locateBufferLabel.setText('Buffer de zoom')
+        self.locateHelpButton.setText('Ajuda')
+        self.locateCenterButton.setText('Centrar')
+        self.locateZoomButton.setText('Zoom')
+
+        self.eventsLrsLayerLabel.setText('Capa amb mesures')
+        self.eventsLrsRouteFieldLabel.setText('Camp de ruta')
+        self.eventsLayerLabel.setText('Capa d\'esdeveniments')
+        self.eventsRouteFieldLabel.setText('Camp de ruta dels esdeveniments')
+        self.eventsMeasureStartFieldLabel.setText('Camp de mesura inicial')
+        self.eventsMeasureEndFieldLabel.setText('Camp de mesura final')
+        self.eventsOffsetStartFieldLabel.setText('Camp de desplaçament inicial')
+        self.eventsOffsetEndFieldLabel.setText('Camp de desplaçament final')
+        self.eventsFeaturesSelectLabel.setText('Elements')
+        self.eventsOutputNameLabel.setText('Nom de la capa de sortida')
+        self.eventsErrorFieldLabel.setText('Camp d\'error de sortida')
+
+        self.measureLrsLayerLabel.setText('Capa amb mesures')
+        self.measureLrsRouteFieldLabel.setText('Camp de ruta')
+        self.measureLayerLabel.setText('Capa')
+        self.measureRouteFieldLabel.setText('Camp de ruta (opcional)')
+        self.measureThresholdLabel.setText('Distancia max. al punt')
+        self.measureOutputNameLabel.setText('Nom de la capa de sortida')
+        self.measureOutputRouteFieldLabel.setText('Camp de ruta de sortida')
+        self.measureMeasureFieldLabel.setText('Camp de mesura de sortida')
+
+        self.genLineLayerLabel.setText('Capa de línies')
+        self.genLineRouteFieldLabel.setText('Camp de ruta de línies')
+        self.genPointLayerLabel.setText('Capa de punts')
+        self.genPointRouteFieldLabel.setText('Camp de ruta de punts')
+        self.genPointMeasureFieldLabel.setText('Camp de mesura')
+        self.genMeasureUnitLabel.setText('Unitat de mesura')
+        self.genSelectionModeLabel.setText('Selecció')
+        self.genSnapLabel.setText('Snap')
+        self.genThresholdLabel.setText('Llindar')
+        self.genParallelModeLabel.setText('Paral·lels')
+        self.genExtrapolateLabel.setText('Extrapolar')
+        self.genOutputNameLabel.setText('Nom de la capa de sortida')
+        self.genSelectionButton.setText('Seleccionar')
+        self.genCreateOutputButton.setText('Crear')
+
+        self.errorFilterLabel.setText('Filtre')
+        self.errorTotalLengthLabel.setText('Longitud total de totes les línies')
+        self.errorIncludedLengthLabel.setText('Longitud de les línies incloses')
+        self.errorSuccessLengthLabel.setText('Longitud del LRS creat correctament')
+        self.addErrorLayersButton.setText('Crear capes d\'error')
+        self.addQualityLayerButton.setText('Crear capa de qualitat')
+        self.addErrorLayersButton.setToolTip('Afegeix capes d\'error a la vista del mapa')
+        self.addQualityLayerButton.setToolTip('Afegeix la capa de qualitat a la vista del mapa')
+
+        for buttonBox in (self.eventsButtonBox, self.measureButtonBox, self.genButtonBox):
+            buttonBox.button(QDialogButtonBox.Ok).setText('Acceptar')
+            buttonBox.button(QDialogButtonBox.Reset).setText('Restablir')
+            buttonBox.button(QDialogButtonBox.Help).setText('Ajuda')
+        self.errorButtonBox.button(QDialogButtonBox.Help).setText('Ajuda')
+
     def addLocateRouteFilter(self):
         parent = self.locateRouteCombo.parentWidget()
         layout = parent.layout() if parent else None
-        self.locateRouteFilterLabel = QLabel(self.tr('Route filter'), parent)
+        self.locateRouteFilterLabel = QLabel(self.tr('Filtre de ruta'), parent)
         self.locateRouteFilterLineEdit = QLineEdit(parent)
-        self.locateRouteFilterLineEdit.setToolTip(self.tr('Filter available routes in the Locate list.'))
-        self.locateRouteFilterLineEdit.setPlaceholderText(self.tr('Type CODIVIA, direction or branch'))
+        self.locateRouteFilterLineEdit.setToolTip(self.tr('Filtra les rutes disponibles de la llista de localització.'))
+        self.locateRouteFilterLineEdit.setPlaceholderText(self.tr('Escriu CODIVIA, sentit o ramal'))
         if layout and isinstance(layout, QGridLayout):
             layout.addWidget(self.locateRouteFilterLabel, 6, 0)
             layout.addWidget(self.locateRouteFilterLineEdit, 6, 1)
@@ -343,13 +418,24 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
             panelLayout.addWidget(self.locateRouteFilterLineEdit, 0, 1)
             layout.addWidget(panel)
 
+    def addLocatePickButton(self):
+        parent = self.locateRouteCombo.parentWidget()
+        layout = parent.layout() if parent else None
+        self.locatePickButton = QPushButton(self.tr('Capturar PK al mapa'), parent)
+        self.locatePickButton.setToolTip(
+            self.tr('Fes clic al mapa per trobar la ruta LRS i la mesura més properes.'))
+        if layout and isinstance(layout, QGridLayout):
+            layout.addWidget(self.locatePickButton, 6, 2)
+        elif layout:
+            layout.addWidget(self.locatePickButton)
+
     def addGenerateRobustOptions(self):
         parent = self.genExtrapolateCheckBox.parentWidget()
         layout = parent.layout() if parent else None
 
-        self.genCompositeRouteIdLabel = QLabel(self.tr('Composite ROUTE_ID fields'), parent)
+        self.genCompositeRouteIdLabel = QLabel(self.tr('Camps del ROUTE_ID compost'), parent)
         self.genCompositeRouteIdLineEdit = QLineEdit(parent)
-        self.genCompositeRouteIdLineEdit.setToolTip(self.tr('Comma separated fields used as logical route id.'))
+        self.genCompositeRouteIdLineEdit.setToolTip(self.tr('Camps separats per comes per formar la ruta lògica.'))
         self.genCompositeRouteIdLineEdit.setText('CODIVIA,DIRECCIO')
 
         self.genCompositeRouteIdCheckBox = QCheckBox(parent)
@@ -362,14 +448,14 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.genDiagnosticsCheckBox = QCheckBox(parent)
 
         robustWidgets = (
-            (self.tr('Use composite ROUTE_ID'), self.genCompositeRouteIdCheckBox),
-            (self.tr('Use official arc measures'), self.genOfficialMeasuresCheckBox),
-            (self.tr('Separate by DIRECCIO'), self.genStrictDirectionCheckBox),
-            (self.tr('Allow shared geometry by direction'), self.genSharedGeometryCheckBox),
-            (self.tr('Continue with warnings'), self.genTolerantModeCheckBox),
-            (self.tr('Treat branches as independent'), self.genRamalHandlingCheckBox),
-            (self.tr('Treat closed rings as independent'), self.genRoundaboutHandlingCheckBox),
-            (self.tr('Generate diagnostics'), self.genDiagnosticsCheckBox),
+            (self.tr('Usar ROUTE_ID compost'), self.genCompositeRouteIdCheckBox),
+            (self.tr('Usar mesures oficials dels arcs'), self.genOfficialMeasuresCheckBox),
+            (self.tr('Separar per DIRECCIO'), self.genStrictDirectionCheckBox),
+            (self.tr('Permetre geometria compartida per sentit'), self.genSharedGeometryCheckBox),
+            (self.tr('Continuar amb advertències'), self.genTolerantModeCheckBox),
+            (self.tr('Tractar els ramals com a independents'), self.genRamalHandlingCheckBox),
+            (self.tr('Tractar els anells tancats com a independents'), self.genRoundaboutHandlingCheckBox),
+            (self.tr('Generar diagnòstics'), self.genDiagnosticsCheckBox),
         )
 
         if layout and isinstance(layout, QGridLayout):
@@ -539,6 +625,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         del self.eventsOffsetEndFieldCM
         del self.eventsFeaturesSelectCM
 
+        self.restorePreviousMapTool()
         self.clearLocateHighlight()
 
         super(LrsDockWidget, self).close()
@@ -781,7 +868,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
                             specialRoundaboutHandling=self.genRoundaboutHandlingCheckBox.isChecked(),
                             generateDiagnostics=self.genDiagnosticsCheckBox.isChecked())
 
-        self.genProgressLabel.setText("Writing features")
+        self.genProgressLabel.setText("Registrant elements")
         self.lrs.progressChanged.connect(self.showGenProgress)
         self.lrs.calibrate()
 
@@ -1100,6 +1187,73 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.locateCenterButton.setEnabled(bool(point))
         self.locateZoomButton.setEnabled(bool(point))
 
+    def activateLocatePickTool(self):
+        if not self.lrsLayer:
+            self.locateCoordinates.setText(self.tr('La capa LRS no està disponible'))
+            return
+        canvas = self.iface.mapCanvas()
+        self.previousMapTool = canvas.mapTool()
+        if self.locatePickMapTool is None:
+            self.locatePickMapTool = QgsMapToolEmitPoint(canvas)
+            self.locatePickMapTool.canvasClicked.connect(self.locateMapClicked)
+        canvas.setMapTool(self.locatePickMapTool)
+        self.locateCoordinates.setText(self.tr('Fes clic al mapa'))
+
+    def locateMapClicked(self, point, button):
+        if not self.lrsLayer:
+            return
+
+        mapSettings = self.iface.mapCanvas().mapSettings()
+        lrsPoint = point
+        if isProjectCrsEnabled() and mapSettings.destinationCrs() != self.lrsLayer.crs:
+            transform = QgsCoordinateTransform(mapSettings.destinationCrs(), self.lrsLayer.crs,
+                                               QgsProject.instance())
+            lrsPoint = transform.transform(point)
+
+        # Use a small click radius. If a route is selected in Locate, constrain
+        # the inverse lookup to that logical road/sense to avoid wrong PKs at
+        # junctions or parallel carriageways.
+        threshold = max(self.iface.mapCanvas().mapUnitsPerPixel() * 12, 10.0)
+        threshold = min(threshold, 50.0)
+        selectedRouteIds = self.locateSelectedRouteIds()
+        routeIds = selectedRouteIds if selectedRouteIds else None
+        routeId, measure, distance = self.lrsLayer.pointMeasureForRoutes(lrsPoint, threshold, routeIds)
+
+        if routeId is None or measure is None:
+            self.locateCoordinates.setText(self.tr('No hi ha cap ruta LRS dins la tolerància del clic'))
+            self.restorePreviousMapTool()
+            return
+
+        self.selectLocateRouteId(routeId)
+        self.locateMeasureSpin.setValue(float(measure))
+        self.resetLocateEvent()
+        self.locateCoordinates.setText('%s | %s | d=%.2f' % (
+            self.locateRouteDisplayLabel(routeId),
+            formatMeasure(measure, self.lrsLayer.measureUnit),
+            distance or 0.0))
+        self.restorePreviousMapTool()
+
+    def restorePreviousMapTool(self):
+        if self.previousMapTool:
+            self.iface.mapCanvas().setMapTool(self.previousMapTool)
+            self.previousMapTool = None
+
+    def selectLocateRouteId(self, routeId):
+        targetValue = None
+        for value, routeIds in self.locateRouteGroups.items():
+            if routeId in routeIds:
+                targetValue = value
+                break
+        if targetValue is None:
+            targetValue = routeId
+
+        idx = self.locateRouteCombo.findData(targetValue, Qt.UserRole)
+        if idx < 0 and self.locateRouteFilterLineEdit.text():
+            self.locateRouteFilterLineEdit.clear()
+            idx = self.locateRouteCombo.findData(targetValue, Qt.UserRole)
+        if idx >= 0:
+            self.locateRouteCombo.setCurrentIndex(idx)
+
     def locateHighlightChanged(self):
         # #debug ('locateHighlightChanged')
         self.clearLocateHighlight()
@@ -1154,12 +1308,12 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
     def addEventsDefaultDirectionOption(self):
         parent = self.eventsRouteFieldCombo.parentWidget()
         layout = parent.layout() if parent else None
-        self.eventsDefaultDirectionLabel = QLabel(self.tr('Default direction'), parent)
+        self.eventsDefaultDirectionLabel = QLabel(self.tr('Sentit per defecte'), parent)
         self.eventsDefaultDirectionCombo = QComboBox(parent)
         self.eventsDefaultDirectionCombo.setToolTip(
-            self.tr('Direction used when the events table has only the road code and no direction.'))
+            self.tr('Sentit utilitzat quan la taula d\'esdeveniments només té el codi de carretera.'))
         self.eventsDefaultDirectionCM = LrsComboManager(self.eventsDefaultDirectionCombo, options=(
-            (None, self.tr('None')),
+            (None, self.tr('Cap')),
             ('Creixent', self.tr('Creixent')),
             ('Decreixent', self.tr('Decreixent'))),
             defaultValue=None, settingsName='eventsDefaultDirection')

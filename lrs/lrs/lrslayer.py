@@ -34,14 +34,17 @@ class LrsLayer(LrsBase):
         self.layer = layer
         self.crs = layer.crs()
         self.routeFieldName = None  # field name
+        self.routeIdsCache = None
 
     def setRouteFieldName(self, routeField):
         self.routeFieldName = routeField
+        self.routeIdsCache = None
 
     # load from layer
     def load(self, progressFunction=None):
         #debug("load %s %s" % (self.layer.name(), self.routeFieldName))
         self.reset()
+        self.routeIdsCache = None
         if not self.routeFieldName:
             return
         total = self.layer.featureCount()
@@ -87,9 +90,10 @@ class LrsLayer(LrsBase):
         #debug("getRouteIds routeFieldName = %s" % self.routeFieldName)
         if not self.layer or not self.routeFieldName:
             return []
-        ids = set()
-        for feature in self.layer.getFeatures():
-            ids.add(feature[self.routeFieldName])
-        ids = list(ids)
-        ids.sort()
-        return ids
+        if self.routeIdsCache is None:
+            ids = set()
+            routeFieldIdx = self.layer.fields().indexFromName(self.routeFieldName)
+            for feature in self.layer.getFeatures():
+                ids.add(feature[routeFieldIdx])
+            self.routeIdsCache = sorted(list(ids))
+        return list(self.routeIdsCache)

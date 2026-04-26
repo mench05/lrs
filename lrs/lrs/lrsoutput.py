@@ -66,7 +66,7 @@ class LrsOutput(QObject):
         count = 0
         for part in parts:
             percent = 100 * count / total
-            self.showProgressFunction("Exporting features", percent)
+            self.showProgressFunction("Exportant elements", percent)
             count += 1
             if count % 100 == 0:
                 QgsApplication.processEvents()
