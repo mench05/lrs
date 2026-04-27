@@ -92,7 +92,7 @@ class LrsEvents(QObject):
         for feature in featuresIterator:
             # debug("create feature.id = %s" % feature.id())
             routeId = feature[routeFieldName]
-            routeId = self.resolveRouteId(routeId, defaultDirection)
+            routeIds = self.resolveRouteIds(routeId, defaultDirection)
             start = feature[startFieldName]
             end = feature[endFieldName] if endFieldName else None
             # Some special (HTML?) characters like "<" were breaking output in console -> escape()
@@ -107,20 +107,26 @@ class LrsEvents(QObject):
                     outputFeature[field.name()] = feature[field.name()]
 
             geo = None
+            error = None
             if endFieldName:
                 if self.is_null(start) or self.is_null(end):
                     error = 'measure is null'
                 else:
-                    line, error = self.lrs.eventMultiPolyLine(routeId, start, end, eventTolerance, startOffset, endOffset)
-                    if line:
-                        geo = QgsGeometry.fromMultiPolylineXY(line)
+                    for candidateRouteId in routeIds:
+                        line, error = self.lrs.eventMultiPolyLine(candidateRouteId, start, end, eventTolerance,
+                                                                  startOffset, endOffset)
+                        if line:
+                            geo = QgsGeometry.fromMultiPolylineXY(line)
+                            break
             else:
                 if self.is_null(start):
                     error = 'measure is null'
                 else:
-                    point, error = self.lrs.eventPointXY(routeId, start, eventTolerance, startOffset)
-                    if point:
-                        geo = QgsGeometry(QgsPoint(point))
+                    for candidateRouteId in routeIds:
+                        point, error = self.lrs.eventPointXY(candidateRouteId, start, eventTolerance, startOffset)
+                        if point:
+                            geo = QgsGeometry(QgsPoint(point))
+                            break
 
             if geo:
                 outputFeature.setGeometry(geo)
@@ -149,48 +155,53 @@ class LrsEvents(QObject):
         if self.progressBar:
             self.progressBar.hide()
 
-    def resolveRouteId(self, routeId, defaultDirection=None):
+    def resolveRouteIds(self, routeId, defaultDirection=None):
         if self.lrs.getRouteIfExists(routeId):
-            return routeId
-        if not defaultDirection:
-            return routeId
+            return [routeId]
         if routeId is None:
-            return routeId
+            return [routeId]
 
         routeText = str(routeId).strip()
         if not routeText:
-            return routeId
+            return [routeId]
 
-        lowerText = routeText.lower()
-        if 'creixent' in lowerText or 'decreixent' in lowerText:
-            return routeId
-
-        candidates = []
-        for base in (routeText, cleanRouteIdPart(routeText)):
-            if not base:
-                continue
-            candidates.append('%s_%s' % (base, defaultDirection))
-            candidates.append('%s %s' % (base, defaultDirection))
-
-        for candidate in candidates:
-            if self.lrs.getRouteIfExists(candidate):
-                return candidate
-
-        matching = []
+        normalizedText = normalizeRouteId(routeText)
         routeIds = self._routeIds
         if routeIds is None and hasattr(self.lrs, 'getRouteIds'):
             routeIds = self.lrs.getRouteIds()
+
+        matches = []
         if routeIds:
             base = normalizeRouteId(cleanRouteIdPart(routeText) or routeText)
-            direction = normalizeRouteId(defaultDirection)
             for candidate in routeIds:
                 normalized = normalizeRouteId(candidate)
-                if normalized.startswith('%s_' % base) and normalized.endswith('_%s' % direction):
-                    matching.append(candidate)
-                elif normalized.startswith('%s_' % base) and ('_%s_' % direction) in normalized:
-                    matching.append(candidate)
+                if normalized == normalizedText or normalized == base:
+                    matches.append(candidate)
+                    continue
 
-        if len(matching) == 1:
-            return matching[0]
+                parts = [part for part in normalized.split('_') if part]
+                if parts and parts[-1] in ('creixent', 'decreixent'):
+                    road = '_'.join(parts[:-1])
+                else:
+                    road = normalized
+                if road == base:
+                    matches.append(candidate)
 
-        return routeId
+        if defaultDirection and routeIds:
+            preferred = []
+            direction = normalizeRouteId(defaultDirection)
+            for candidate in matches:
+                normalized = normalizeRouteId(candidate)
+                if normalized.endswith('_%s' % direction) or ('_%s_' % direction) in normalized:
+                    preferred.append(candidate)
+            if preferred:
+                matches = preferred + [candidate for candidate in matches if candidate not in preferred]
+
+        if matches:
+            deduped = []
+            for candidate in matches:
+                if candidate not in deduped:
+                    deduped.append(candidate)
+            return deduped
+
+        return [routeId]

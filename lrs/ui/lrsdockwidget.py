@@ -25,7 +25,7 @@ import os
 import zlib
 
 from qgis.PyQt import uic
-from qgis.PyQt.QtCore import QVariant, QCoreApplication
+from qgis.PyQt.QtCore import QVariant, QCoreApplication, QTimer
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialogButtonBox, QDockWidget, QGridLayout,
                                  QLabel, QLineEdit, QPushButton, QTableView, QWidget)
@@ -130,9 +130,16 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
                                                   defaultValue=True)
         self.locateBufferWM = LrsWidgetManager(self.locateBufferSpin, settingsName='locateBuffer', defaultValue=200.0)
 
+        self.locateRouteFilterTimer = QTimer(self)
+        self.locateRouteFilterTimer.setSingleShot(True)
+        self.locateRouteFilterTimer.timeout.connect(self.resetLocateRoutes)
+        self.locateMeasureTimer = QTimer(self)
+        self.locateMeasureTimer.setSingleShot(True)
+        self.locateMeasureTimer.timeout.connect(self.resetLocateEvent)
+
         self.locateRouteCombo.currentIndexChanged.connect(self.locateRouteChanged)
-        self.locateRouteFilterLineEdit.textChanged.connect(self.resetLocateRoutes)
-        self.locateMeasureSpin.valueChanged.connect(self.resetLocateEvent)
+        self.locateRouteFilterLineEdit.textChanged.connect(self.scheduleResetLocateRoutes)
+        self.locateMeasureSpin.valueChanged.connect(self.scheduleResetLocateEvent)
         self.locateBufferSpin.valueChanged.connect(self.locateBufferChanged)
         self.locateCenterButton.clicked.connect(self.locateCenter)
         self.locateHighlightCheckBox.stateChanged.connect(self.locateHighlightChanged)
@@ -520,6 +527,23 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
                                                         settingsName='specialRoundaboutHandling', defaultValue=True)
         self.genDiagnosticsWM = LrsWidgetManager(self.genDiagnosticsCheckBox,
                                                  settingsName='generateDiagnostics', defaultValue=True)
+        self.hideGenerateRobustOptions()
+
+    def hideGenerateRobustOptions(self):
+        widgets = [
+            self.genCompositeRouteIdLabel,
+            self.genCompositeRouteIdLineEdit,
+            self.genCompositeRouteIdCheckBox,
+            self.genOfficialMeasuresCheckBox,
+            self.genStrictDirectionCheckBox,
+            self.genSharedGeometryCheckBox,
+            self.genTolerantModeCheckBox,
+            self.genRamalHandlingCheckBox,
+            self.genRoundaboutHandlingCheckBox,
+            self.genDiagnosticsCheckBox,
+        ]
+        for widget in widgets:
+            widget.hide()
 
     def lrsLayerChanged(self, layer):
         # debug("lrsLayerChanged layer: %s" % (layer.name() if layer else None))
@@ -538,6 +562,12 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.loadLrsLayer()
         self.lrsLayerCM.writeToProject()
         self.lrsRouteFieldCM.writeToProject()
+
+    def scheduleResetLocateRoutes(self):
+        self.locateRouteFilterTimer.start(250)
+
+    def scheduleResetLocateEvent(self):
+        self.locateMeasureTimer.start(250)
 
     def loadLrsLayer(self):
         fieldName = self.lrsRouteFieldCM.value()
@@ -640,6 +670,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
             'tolerantMode': self.genTolerantModeCheckBox.isChecked(),
             'specialRamalHandling': self.genRamalHandlingCheckBox.isChecked(),
             'specialRoundaboutHandling': self.genRoundaboutHandlingCheckBox.isChecked(),
+            'generateDiagnostics': self.genDiagnosticsCheckBox.isChecked(),
         }
 
     def clearLrsCache(self):
@@ -726,7 +757,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
     def setupErrorModel(self):
         self.errorZoomButton.setEnabled(False)
         self.errorModel = LrsErrorModel()
-        self.errorModel.addErrors(self.lrs.getErrors())
+        self.errorModel.addErrors(self.visibleErrors())
 
         self.sortErrorModel = QSortFilterProxyModel()
         self.sortErrorModel.setFilterKeyColumn(-1)
@@ -740,6 +771,20 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.errorView.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.errorView.setSelectionMode(QTableView.SingleSelection)
         self.errorView.selectionModel().selectionChanged.connect(self.errorSelectionChanged)
+
+    def visibleErrors(self):
+        if not self.lrs:
+            return []
+        return [error for error in self.lrs.getErrors() if error.severity == 'ERROR']
+
+    def visibleErrorUpdates(self, errorUpdates):
+        filtered = dict(errorUpdates)
+        filtered['updatedErrors'] = [error for error in errorUpdates.get('updatedErrors', [])
+                                     if error.severity == 'ERROR']
+        filtered['addedErrors'] = [error for error in errorUpdates.get('addedErrors', [])
+                                   if error.severity == 'ERROR']
+        # removed checksums can be kept as-is; if they don't exist in the visible model/layers they are ignored.
+        return filtered
 
     def close(self):
         # #debug( "LrsDockWidget.close")
@@ -1072,6 +1117,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
     # ------------------------------- ERRORS -------------------------------
     def updateErrors(self, errorUpdates):
         # #debug ( "updateErrors" )
+        errorUpdates = self.visibleErrorUpdates(errorUpdates)
         # because SingleSelection does not allow to deselect row, we have to clear selection manually
         index = self.getSelectedErrorIndex()
         if index:
@@ -1121,7 +1167,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
 
         outputFeatures = []
         fields = outputLayer.fields()
-        for error in self.lrs.getErrors():
+        for error in self.visibleErrors():
             feature = QgsFeature(fields)
             feature.setAttribute('error', error.typeLabel())
             feature.setAttribute('severity', error.severity)
@@ -1182,14 +1228,14 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         if self.errorPointLayerManager is None:
             return
         self.errorPointLayerManager.clear()
-        errors = self.lrs.getErrors()
+        errors = self.visibleErrors()
         self.errorPointLayerManager.addErrors(errors, self.lrs.crs)
 
     def resetErrorLineLayer(self):
         if self.errorLineLayerManager is None:
             return
         self.errorLineLayerManager.clear()
-        errors = self.lrs.getErrors()
+        errors = self.visibleErrors()
         self.errorLineLayerManager.addErrors(errors, self.lrs.crs)
 
     def addQualityLayer(self):
@@ -1264,21 +1310,15 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
     def locateRouteDisplayLabel(self, routeId):
         text = "%s" % routeId
         parts = [p for p in text.split('_') if p]
-        direction = None
         directionIndex = None
         for i in range(len(parts) - 1, -1, -1):
             part = parts[i]
             if part.lower() in ('creixent', 'decreixent'):
-                direction = part
                 directionIndex = i
                 break
 
         roadParts = parts[:directionIndex] if directionIndex is not None else parts
         road = "/".join(roadParts) if roadParts else text
-        # Preserve the official logical road/subroad code. C-17 and
-        # C-17LD/510-CA are different routes and must not be merged in Locate.
-        if direction:
-            return "%s %s" % (road, direction)
         return road
 
     def locateSelectedRouteIds(self):
@@ -1499,6 +1539,8 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
             ('Creixent', self.tr('Creixent')),
             ('Decreixent', self.tr('Decreixent'))),
             defaultValue=None, settingsName='eventsDefaultDirection')
+        self.eventsDefaultDirectionLabel.hide()
+        self.eventsDefaultDirectionCombo.hide()
 
         if layout and isinstance(layout, QGridLayout):
             layout.addWidget(self.eventsDefaultDirectionLabel, 2, 0)

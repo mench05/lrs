@@ -239,6 +239,11 @@ class LrsCalibPart(LrsPartBase):
         tolerance = max(abs(referenceMeasure) * 0.001, 0.001)
         return abs(measure) <= tolerance
 
+    def endpointSnapPartTolerance(self):
+        if self.crs and self.crs.mapUnits() == QgsUnitTypes.DistanceDegrees:
+            return 150.0 / 111320.0
+        return 150.0
+
     # extrapolate before and after (add calculated records)
     def extrapolate(self):
         # debug ('extrapolate part')

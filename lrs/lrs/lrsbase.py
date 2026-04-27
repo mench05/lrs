@@ -206,12 +206,12 @@ class LrsBase(QObject):
     def pointMeasure(self, point, threshold):
         result = self.nearestRoutePartMeasure(point, threshold)
         if result:
-            return result[0], self.snapMeasureToRoute(result[0], result[2])
+            return result[0], result[2]
 
         return None, None
 
     def pointMeasureForRoutes(self, point, threshold, routeIds=None):
         result = self.nearestRoutePartMeasure(point, threshold, routeIds)
         if result:
-            return result[0], self.snapMeasureToRoute(result[0], result[2]), result[3]
+            return result[0], result[2], result[3]
         return None, None, None
