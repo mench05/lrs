@@ -81,6 +81,15 @@ def logCritical(msg):
     QgsMessageLog.logMessage(msg, 'LRS Plugin', Qgis.Critical)
 
 
+def makeField(name, fieldType=QVariant.String, length=0, precision=0):
+    field = QgsField(name, fieldType)
+    if length and length > 0:
+        field.setLength(length)
+    if precision and precision > 0:
+        field.setPrecision(precision)
+    return field
+
+
 # compare 2 doubles
 def doubleNear(d1, d2):
     return abs(d1 - d2) < 1e-10

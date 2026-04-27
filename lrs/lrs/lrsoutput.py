@@ -35,7 +35,7 @@ class LrsOutput(QObject):
         #geometryType = "MultiLineStringM"
         geometryType = "LineStringM"
         uri = geometryType
-        uri += "?crs=%s" % crsString(self.iface.mapCanvas().mapSettings().destinationCrs())
+        uri += "?crs=%s" % crsString(self.lrs.crs or self.iface.mapCanvas().mapSettings().destinationCrs())
         provider = QgsProviderRegistry.instance().createProvider('memory', uri)
 
         routeField = self.lrs.routeField
@@ -48,16 +48,17 @@ class LrsOutput(QObject):
             routeFieldType = "double"
 
         provider.addAttributes([
-            QgsField(routeFieldName, routeField.type(), routeFieldType),
-            QgsField("m_from", QVariant.Double, 'double'),
-            QgsField("m_to", QVariant.Double, 'double'),
+            makeField(routeFieldName, routeField.type(), routeField.length(), routeField.precision()),
+            makeField("m_from", QVariant.Double),
+            makeField("m_to", QVariant.Double),
         ])
         uri = provider.dataSourceUri()
         #debug('uri: %s' % uri)
 
         outputLayer = QgsVectorLayer(uri, outputName, 'memory')
+        outputProvider = outputLayer.dataProvider()
         outputFeatures = []
-        batchSize = 500
+        batchSize = 2000
 
         parts = self.lrs.getParts()
         total = len(parts)
@@ -68,7 +69,7 @@ class LrsOutput(QObject):
             percent = 100 * count / total
             self.showProgressFunction("Exportant elements", percent)
             count += 1
-            if count % 100 == 0:
+            if count % 250 == 0:
                 QgsApplication.processEvents()
             if not part.records:
                 continue
@@ -89,11 +90,14 @@ class LrsOutput(QObject):
 
             outputFeatures.append(outputFeature)
             if len(outputFeatures) >= batchSize:
-                outputLayer.dataProvider().addFeatures(outputFeatures)
+                outputProvider.addFeatures(outputFeatures)
                 outputFeatures = []
                 QgsApplication.processEvents()
 
         if outputFeatures:
-            outputLayer.dataProvider().addFeatures(outputFeatures)
+            outputProvider.addFeatures(outputFeatures)
+
+        outputLayer.updateExtents()
+        self.showProgressFunction("Exportant elements", 100)
 
         QgsProject.instance().addMapLayers([outputLayer, ])

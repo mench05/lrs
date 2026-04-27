@@ -79,11 +79,13 @@ class LrsCalib(LrsBase):
         self.useOfficialArcMeasures = kwargs.get('useOfficialArcMeasures', False)
         self.tolerantMode = kwargs.get('tolerantMode', True)
         self.strictDirection = kwargs.get('strictDirection', False)
+        self.autoSegmentEndpoints = kwargs.get('autoSegmentEndpoints', True)
         self.allowSharedGeometryDirections = kwargs.get('allowSharedGeometryDirections', True)
         self.specialRamalHandling = kwargs.get('specialRamalHandling', True)
         self.specialRoundaboutHandling = kwargs.get('specialRoundaboutHandling', True)
         self.generateDiagnostics = kwargs.get('generateDiagnostics', True)
         self.roundaboutMode = kwargs.get('roundaboutMode', 'independent')
+        self.allowForeignEndpointMilestones = kwargs.get('allowForeignEndpointMilestones', False)
         self.codiviaField = kwargs.get('codiviaField', 'CODIVIA')
         self.directionField = kwargs.get('directionField', 'DIRECCIO')
         self.idlrsField = kwargs.get('idlrsField', 'IDLRS')
@@ -131,6 +133,8 @@ class LrsCalib(LrsBase):
         self.lineGeometryDirections = {}
         self.pointLocationDirections = {}
         self.routeDirections = {}
+        self.foreignEndpointPointIndex = None
+        self.foreignEndpointPointLookup = {}
         self._sharedGeometryDiagnostics = set()
         self._pkLocationDiagnostics = set()
         self.lineFieldIndexes = {}
@@ -222,10 +226,12 @@ class LrsCalib(LrsBase):
                                                   useOfficialArcMeasures=self.useOfficialArcMeasures,
                                                   tolerantMode=self.tolerantMode,
                                                   strictDirection=self.strictDirection,
+                                                  autoSegmentEndpoints=self.autoSegmentEndpoints,
                                                   allowSharedGeometryDirections=self.allowSharedGeometryDirections,
                                                   specialRamalHandling=self.specialRamalHandling,
                                                   specialRoundaboutHandling=self.specialRoundaboutHandling,
-                                                  roundaboutMode=self.roundaboutMode)
+                                                  roundaboutMode=self.roundaboutMode,
+                                                  allowForeignEndpointMilestones=self.allowForeignEndpointMilestones)
         return self.routes[normalId]
 
 
@@ -266,6 +272,41 @@ class LrsCalib(LrsBase):
             if fieldName and fieldName not in indexes:
                 indexes[fieldName] = fields.indexFromName(fieldName)
         return indexes
+
+    def featureRequest(self, layer, fieldIndexes):
+        request = QgsFeatureRequest()
+        fieldNames = []
+        fields = layer.fields()
+        for idx in fieldIndexes.values():
+            if idx is not None and idx >= 0:
+                fieldNames.append(fields.at(idx).name())
+        if fieldNames:
+            request.setSubsetOfAttributes(sorted(set(fieldNames)), fields)
+        return request
+
+    def buildForeignEndpointPointIndex(self):
+        if not self.allowForeignEndpointMilestones:
+            self.foreignEndpointPointIndex = None
+            self.foreignEndpointPointLookup = {}
+            return
+        self.foreignEndpointPointIndex = QgsSpatialIndex()
+        self.foreignEndpointPointLookup = {}
+        idxFid = 1
+        for point in self.points.values():
+            if point.measure is None or not point.geo:
+                continue
+            pts = [point.geo.asPoint()] if QgsWkbTypes.isSingleType(point.geo.wkbType()) else point.geo.asMultiPoint()
+            for geoPart, pnt in enumerate(pts):
+                feature = QgsFeature(idxFid)
+                feature.setGeometry(QgsGeometry.fromPointXY(pnt))
+                self.foreignEndpointPointIndex.addFeature(feature)
+                self.foreignEndpointPointLookup[idxFid] = {
+                    'point': point,
+                    'geoPart': geoPart,
+                    'nGeoParts': len(pts),
+                    'pnt': pnt,
+                }
+                idxFid += 1
 
     def featureRouteId(self, feature, routeFieldName, fieldIndexes=None):
         if self.useCompositeRouteId:
@@ -403,7 +444,8 @@ class LrsCalib(LrsBase):
             return transforms
 
         pairsByRoute = {}
-        for feature in self.pointLayer.getFeatures():
+        request = self.featureRequest(self.pointLayer, self.pointFieldIndexes)
+        for feature in self.pointLayer.getFeatures(request):
             routeId = self.featureRouteId(feature, self.pointRouteField, self.pointFieldIndexes)
             if routeId is None:
                 continue
@@ -436,7 +478,7 @@ class LrsCalib(LrsBase):
                 continue
             feature = QgsFeature(idxFid)
             feature.setGeometry(line.geo)
-            lineIndex.insertFeature(feature)
+            lineIndex.addFeature(feature)
             lineByIndexFid[idxFid] = line
             idxFid += 1
 
@@ -530,9 +572,9 @@ class LrsCalib(LrsBase):
         self.officialArcMeasureScaleResolved = officialArcMeasureScale
         self.officialArcMeasureTransforms = self.buildOfficialArcMeasureTransforms()
         field = self.lineLayer.fields().field(self.lineRouteField)
-        self.routeField = QgsField(field.name(), field.type(), field.typeName(), field.length(), field.precision())
+        self.routeField = makeField(field.name(), field.type(), field.length(), field.precision())
         if self.useCompositeRouteId or self.strictDirection:
-            self.routeField = QgsField(field.name(), QVariant.String, "string")
+            self.routeField = makeField(field.name(), QVariant.String)
 
         self.progressCounts = {}
         # we don't know progressTotal at the beginning, but we can estimate it
@@ -544,8 +586,13 @@ class LrsCalib(LrsBase):
 
         self.registerLines(officialArcMeasureScale)
         self.registerPoints()
+        if self.allowForeignEndpointMilestones:
+            self.buildForeignEndpointPointIndex()
         self.detectSameArcMultiplePkDirections()
         for route in list(self.routes.values()):
+            if self.allowForeignEndpointMilestones:
+                route.foreignEndpointPointIndex = self.foreignEndpointPointIndex
+                route.foreignEndpointPointLookup = self.foreignEndpointPointLookup
             route.calibrate(self.extrapolate)
             self.progressStep(self.CALIBRATING_ROUTES)
             QgsApplication.processEvents()
@@ -633,7 +680,8 @@ class LrsCalib(LrsBase):
     def registerLines(self, officialArcMeasureScale=1.0):
         self.routes = {}
         count = 0
-        for feature in self.lineLayer.getFeatures():
+        request = self.featureRequest(self.lineLayer, self.lineFieldIndexes)
+        for feature in self.lineLayer.getFeatures(request):
             line = self.registerLineFeature(feature, officialArcMeasureScale)
             # self.stats['lineFeatures'] += 1
             length = 0
@@ -707,7 +755,8 @@ class LrsCalib(LrsBase):
 
     def registerPoints(self):
         count = 0
-        for feature in self.pointLayer.getFeatures():
+        request = self.featureRequest(self.pointLayer, self.pointFieldIndexes)
+        for feature in self.pointLayer.getFeatures(request):
             point = self.registerPointFeature(feature)
             # self.stats['pointFeatures'] += 1
             # if point:
@@ -755,6 +804,34 @@ class LrsCalib(LrsBase):
         for route in self.routes.values():
             features.extend(route.getQualityFeatures())
         return features
+
+    def toCacheData(self):
+        routeField = self.routeField
+        routeFieldData = {
+            'name': routeField.name() if routeField else self.lineRouteField,
+            'type': int(routeField.type()) if routeField else int(QVariant.String),
+            'typeName': routeField.typeName() if routeField else 'string',
+            'length': routeField.length() if routeField else 0,
+            'precision': routeField.precision() if routeField else 0,
+        }
+        parts = []
+        for part in self.getParts():
+            coords = part.getCoordinatesWithMeasures()
+            if coords and len(coords) >= 2:
+                parts.append({
+                    'routeId': part.routeId,
+                    'coords': coords,
+                    'mFrom': part.milestoneMeasureFrom(),
+                    'mTo': part.milestoneMeasureTo(),
+                })
+        return {
+            'version': 1,
+            'crs': self.crs.authid() if self.crs and self.crs.isValid() else '',
+            'measureUnit': self.measureUnit,
+            'routeField': routeFieldData,
+            'parts': parts,
+            'stats': dict(self.stats),
+        }
 
     # ----------------------------- Editing ---------------------------------
     def pointLayerEditingStarted(self):

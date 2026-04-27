@@ -23,7 +23,7 @@
 import math
 from html import escape
 
-from qgis.core import QgsPoint, QgsPointXY, QgsGeometry
+from qgis.core import QgsPoint, QgsPointXY, QgsGeometry, QgsLineString
 
 from .utils import pointXYOnLine, pointsDistance, debug, offsetPt
 from .lrsrecord import LrsRecord
@@ -51,6 +51,35 @@ class LrsLayerPart(LrsPartBase):
             self.records.append(record)
         self.polylineGeo = polylineGeo  # possibly reversed
         self.polyline = polylineGeo.asPolyline()  # list
+
+    def milestoneMeasureFrom(self):
+        if not self.records:
+            return None
+        return self.records[0].milestoneFrom
+
+    def milestoneMeasureTo(self):
+        if not self.records:
+            return None
+        return self.records[-1].milestoneTo
+
+    def getCoordinatesWithMeasures(self):
+        coords = []
+        if not self.linestring:
+            return coords
+        for i in range(self.linestring.numPoints()):
+            point = self.linestring.pointN(i)
+            coords.append([point.x(), point.y(), self.linestring.mAt(i)])
+        return coords
+
+    def getGeometryWithMeasures(self):
+        if not self.linestring or self.linestring.numPoints() < 2:
+            return None
+        line = QgsLineString()
+        for coord in self.getCoordinatesWithMeasures():
+            point = QgsPoint(coord[0], coord[1])
+            point.addMValue(coord[2])
+            line.addVertex(point)
+        return QgsGeometry(line)
 
     # overridden
     def eventPointXY(self, start, startOffset=0.0):

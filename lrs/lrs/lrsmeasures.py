@@ -46,8 +46,8 @@ class LrsMeasures(QObject):
         fixFields(fieldsList)
         provider.addAttributes(fieldsList)
         provider.addAttributes([
-            QgsField(outputRouteFieldName, lrsRouteField.type(), lrsRouteField.typeName()),
-            QgsField(measureFieldName, QVariant.Double, "double"),
+            makeField(outputRouteFieldName, lrsRouteField.type(), lrsRouteField.length(), lrsRouteField.precision()),
+            makeField(measureFieldName, QVariant.Double),
         ])
 
         uri = provider.dataSourceUri()
@@ -108,8 +108,10 @@ class LrsMeasures(QObject):
                 # measure along the feature's route, if it specifies one; otherwise, find the nearest route and
                 # measure along it
                 if featureRouteId is not None:
-                    routeId = featureRouteId
-                    measure = featureRoute.pointMeasure(point) if featureRoute is not None else None
+                    if featureRoute is not None:
+                        routeId, measure, distance = self.lrs.pointMeasureForRoutes(point, threshold, [featureRouteId])
+                    else:
+                        routeId, measure = featureRouteId, None
                 else:
                     routeId, measure = self.lrs.pointMeasure(point, threshold)
                 # debug ( "routeId = %s merasure = %s" % (routeId, measure) )

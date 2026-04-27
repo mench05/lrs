@@ -40,6 +40,38 @@ class LrsBase(QObject):
         self.partSpatialIndex = None
         self.partSpatialIndexRoutePart = None
 
+    def defaultMeasureTolerance(self, meters=150.0):
+        if self.measureUnit == LrsUnits.METER:
+            return meters
+        if self.measureUnit == LrsUnits.KILOMETER:
+            return meters / 1000.0
+        if self.measureUnit == LrsUnits.FEET:
+            return meters * 3.2808399
+        if self.measureUnit == LrsUnits.MILE:
+            return meters / 1609.344
+        # Conservative fallback for cached/imported LRS where the unit is not explicit.
+        return meters / 1000.0
+
+    def snapMeasureToRoute(self, routeId, measure, tolerance=None):
+        if measure is None:
+            return None
+        route = self.getRouteIfExists(routeId)
+        if not route:
+            return measure
+        tolerance = self.defaultMeasureTolerance(120.0) if tolerance is None else tolerance
+        nearest = None
+        nearestDelta = sys.float_info.max
+        for part in route.parts:
+            for record in getattr(part, 'records', []):
+                for endpoint in (record.milestoneFrom, record.milestoneTo):
+                    if endpoint is None:
+                        continue
+                    delta = abs(endpoint - measure)
+                    if delta <= tolerance and delta < nearestDelta:
+                        nearest = endpoint
+                        nearestDelta = delta
+        return nearest if nearest is not None else measure
+
     def reset(self):
         self.routes = {}
         self.partSpatialIndex = None
@@ -124,7 +156,7 @@ class LrsBase(QObject):
                 feature = QgsFeature(fid)
                 geo = QgsGeometry.fromPolylineXY(route.parts[i].polyline)
                 feature.setGeometry(geo)
-                self.partSpatialIndex.insertFeature(feature)
+                self.partSpatialIndex.addFeature(feature)
                 self.partSpatialIndexRoutePart[fid] = [route.routeId, i]
                 fid += 1
                 count += 1
@@ -174,12 +206,12 @@ class LrsBase(QObject):
     def pointMeasure(self, point, threshold):
         result = self.nearestRoutePartMeasure(point, threshold)
         if result:
-            return result[0], result[2]
+            return result[0], self.snapMeasureToRoute(result[0], result[2])
 
         return None, None
 
     def pointMeasureForRoutes(self, point, threshold, routeIds=None):
         result = self.nearestRoutePartMeasure(point, threshold, routeIds)
         if result:
-            return result[0], result[2], result[3]
+            return result[0], self.snapMeasureToRoute(result[0], result[2]), result[3]
         return None, None, None

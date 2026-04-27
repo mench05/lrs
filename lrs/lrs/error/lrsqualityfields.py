@@ -20,7 +20,9 @@
  ***************************************************************************/
 """
 from PyQt5.QtCore import QVariant
-from qgis.core import QgsFields, QgsField
+from qgis.core import QgsFields
+
+from ..utils import makeField
 
 
 class LrsQualityFields(QgsFields):
@@ -28,14 +30,14 @@ class LrsQualityFields(QgsFields):
         super(LrsQualityFields, self).__init__()
 
         fields = [
-            QgsField('route', QVariant.String, "string"),
-            QgsField('m_from', QVariant.Double, "double"),
-            QgsField('m_to', QVariant.Double, "double"),
-            QgsField('m_len', QVariant.Double, "double"),
-            QgsField('len', QVariant.Double, "double"),
-            QgsField('err_abs', QVariant.Double, "double"),
-            QgsField('err_rel', QVariant.Double, "double"),
-            QgsField('err_perc', QVariant.Double, "double"),  # relative in percents
+            makeField('route', QVariant.String),
+            makeField('m_from', QVariant.Double),
+            makeField('m_to', QVariant.Double),
+            makeField('m_len', QVariant.Double),
+            makeField('len', QVariant.Double),
+            makeField('err_abs', QVariant.Double),
+            makeField('err_rel', QVariant.Double),
+            makeField('err_perc', QVariant.Double),  # relative in percents
         ]
         for field in fields:
             self.append(field)

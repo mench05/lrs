@@ -57,15 +57,113 @@ class LrsCalibRoute(LrsRouteBase):
         self.roundaboutMode = kwargs.get('roundaboutMode', 'independent')
         self.allowSharedGeometryDirections = kwargs.get('allowSharedGeometryDirections', True)
         self.strictDirection = kwargs.get('strictDirection', True)
+        self.autoSegmentEndpoints = kwargs.get('autoSegmentEndpoints', True)
+        self.allowForeignEndpointMilestones = kwargs.get('allowForeignEndpointMilestones', True)
+        self.foreignEndpointPointIndex = None
+        self.foreignEndpointPointLookup = {}
+        self.partSpatialIndex = None
+        self.partSpatialIndexLookup = {}
+
+    def routeContext(self):
+        context = {'codivia': '', 'direccio': '', 'idlrs': '', 'idpk': ''}
+        for collection in (self.lines, self.points):
+            for item in collection:
+                for key in context:
+                    value = getattr(item, key, None)
+                    if value not in (None, '') and context[key] == '':
+                        context[key] = value
+                if context['codivia'] and context['direccio'] and context['idlrs']:
+                    return context
+        return context
 
     def addDiagnostic(self, type, geo, **kwargs):
         severity = kwargs.pop('severity', 'WARNING')
         elementType = kwargs.pop('elementType', '')
+        for key, value in self.routeContext().items():
+            kwargs.setdefault(key, value)
         self.errors.append(LrsError(type, geo, routeId=self.routeId, severity=severity,
                                     elementType=elementType, **kwargs))
 
+    def directionCompatible(self, point):
+        routeDirection = self.routeContext().get('direccio')
+        pointDirection = getattr(point, 'direccio', None)
+        if not routeDirection or not pointDirection:
+            return True
+        return normalizeRouteId(routeDirection) == normalizeRouteId(pointDirection)
+
+    def endpointHasMilestone(self, part, endpointMeasure, tolerance):
+        for milestone in part.milestones:
+            if milestone.partMeasure is None:
+                continue
+            if abs(milestone.partMeasure - endpointMeasure) <= tolerance:
+                return True
+        return False
+
+    def findForeignEndpointMilestone(self, endpointPoint):
+        if not self.foreignEndpointPointIndex:
+            return None
+
+        best = None
+        bestDist = sys.float_info.max
+        rect = QgsRectangle(endpointPoint.x() - self.threshold, endpointPoint.y() - self.threshold,
+                            endpointPoint.x() + self.threshold, endpointPoint.y() + self.threshold)
+        for fid in self.foreignEndpointPointIndex.intersects(rect):
+            candidate = self.foreignEndpointPointLookup.get(fid)
+            if not candidate:
+                continue
+            point = candidate['point']
+            if point.routeId is None or normalizeRouteId(point.routeId) == normalizeRouteId(self.routeId):
+                continue
+            if point.measure is None or not self.directionCompatible(point):
+                continue
+            pnt = candidate['pnt']
+            dist = pointsDistance(endpointPoint, pnt)
+            if dist <= self.threshold and dist < bestDist:
+                best = LrsMilestone(point.fid, candidate['geoPart'], candidate['nGeoParts'], endpointPoint,
+                                    point.measure)
+                bestDist = dist
+        return best
+
+    def borrowForeignEndpointMilestones(self):
+        if not self.allowForeignEndpointMilestones:
+            return
+
+        endpointTolerance = max(self.threshold * 0.05, 1e-8)
+        for partIdx, part in enumerate(self.parts):
+            if len(part.milestones) >= 2 or len(part.polyline) < 2:
+                continue
+            endpoints = ((0, 0.0), (-1, part.length))
+            for vertexIndex, endpointMeasure in endpoints:
+                if self.endpointHasMilestone(part, endpointMeasure, endpointTolerance):
+                    continue
+                milestone = self.findForeignEndpointMilestone(part.polyline[vertexIndex])
+                if not milestone:
+                    continue
+                milestone.partIdx = partIdx
+                milestone.partMeasure = endpointMeasure
+                part.milestones.append(milestone)
+                if len(part.milestones) >= 2:
+                    break
+
     def addLine(self, line):
         self.lines.append(line)
+
+    def clearPartSpatialIndex(self):
+        self.partSpatialIndex = None
+        self.partSpatialIndexLookup = {}
+
+    def buildPartSpatialIndex(self):
+        self.clearPartSpatialIndex()
+        if not self.parts:
+            return
+        self.partSpatialIndex = QgsSpatialIndex()
+        for idx, part in enumerate(self.parts, start=1):
+            if not part.polylineGeo:
+                continue
+            feature = QgsFeature(idx)
+            feature.setGeometry(part.polylineGeo)
+            self.partSpatialIndex.addFeature(feature)
+            self.partSpatialIndexLookup[idx] = idx - 1
 
     def allowSingleMilestoneParts(self):
         if not self.tolerantMode or not self.specialRamalHandling:
@@ -80,34 +178,42 @@ class LrsCalibRoute(LrsRouteBase):
         self.milestones = []
         self.errors = []
         self.allErrors_ = []
+        self.clearPartSpatialIndex()
 
         if self.routeId is None:  # special case
             for line in self.lines:
                 if not line.geo: continue
                 origin = LrsOrigin(QgsWkbTypes.LineGeometry, line.fid)
-                self.errors.append(LrsError(LrsError.NO_ROUTE_ID, line.geo, origins=[origin]))
+                self.errors.append(LrsError(LrsError.NO_ROUTE_ID, line.geo, origins=[origin],
+                                            codivia=line.codivia, direccio=line.direccio, idlrs=line.idlrs))
 
             for point in self.points:
                 if not point.geo: continue
                 origin = LrsOrigin(QgsWkbTypes.PointGeometry, point.fid)
-                self.errors.append(LrsError(LrsError.NO_ROUTE_ID, point.geo, origins=[origin]))
+                self.errors.append(LrsError(LrsError.NO_ROUTE_ID, point.geo, origins=[origin],
+                                            codivia=point.codivia, direccio=point.direccio, idpk=point.idpk,
+                                            measure=point.measure))
 
                 # in addition it may be without measure
                 if point.measure == None:
                     origin = LrsOrigin(QgsWkbTypes.PointGeometry, point.fid)
-                    self.errors.append(LrsError(LrsError.NO_MEASURE, point.geo, origins=[origin]))
+                    self.errors.append(LrsError(LrsError.NO_MEASURE, point.geo, origins=[origin],
+                                                codivia=point.codivia, direccio=point.direccio, idpk=point.idpk))
 
         elif len(self.lines) == 0:  # no lines -> orphan points
             for point in self.points:
                 if not point.geo: continue
                 origin = LrsOrigin(QgsWkbTypes.PointGeometry, point.fid)
                 self.errors.append(
-                    LrsError(LrsError.ORPHAN, point.geo, routeId=self.routeId, measure=point.measure, origins=[origin]))
+                    LrsError(LrsError.ORPHAN, point.geo, routeId=self.routeId, measure=point.measure,
+                             origins=[origin], codivia=point.codivia, direccio=point.direccio, idpk=point.idpk))
 
                 # in addition it may be without measure
                 if point.measure == None:
                     origin = LrsOrigin(QgsWkbTypes.PointGeometry, point.fid)
-                    self.errors.append(LrsError(LrsError.NO_MEASURE, point.geo, routeId=self.routeId, origins=[origin]))
+                    self.errors.append(LrsError(LrsError.NO_MEASURE, point.geo, routeId=self.routeId,
+                                                origins=[origin], codivia=point.codivia,
+                                                direccio=point.direccio, idpk=point.idpk))
 
         else:
             if self.useOfficialArcMeasures:
@@ -116,8 +222,9 @@ class LrsCalibRoute(LrsRouteBase):
                 self.buildParts()
                 self.createMilestones()
                 self.attachMilestones()
+                self.borrowForeignEndpointMilestones()
                 self.calibrateParts()
-                if extrapolate:
+                if extrapolate or self.autoSegmentEndpoints:
                     self.extrapolateParts()
                 self.checkPartOverlaps()
 
@@ -323,7 +430,8 @@ class LrsCalibRoute(LrsRouteBase):
                                        message='Official measure delta is zero but geometry has length')
                     continue
 
-                part = LrsCalibPart(polyline, self.routeId, origins, self.crs, self.measureUnit, self.distanceArea)
+                part = LrsCalibPart(polyline, self.routeId, origins, self.crs, self.measureUnit, self.distanceArea,
+                                    codivia=line.codivia, direccio=line.direccio, idlrs=line.idlrs)
                 if part.length <= 0:
                     self.addDiagnostic(LrsError.EMPTY_GEOMETRY, geo, origins=origins, severity='WARNING',
                                        elementType='ARC', codivia=line.codivia, direccio=line.direccio,
@@ -498,7 +606,7 @@ class LrsCalibRoute(LrsRouteBase):
                     break
 
             part = LrsCalibPart(polyline, self.routeId, origins, self.crs, self.measureUnit, self.distanceArea,
-                                allowSingleMilestone=self.allowSingleMilestoneParts())
+                                allowSingleMilestone=self.allowSingleMilestoneParts(), **self.routeContext())
             if part.length > 0:
                 self.parts.append(part)
             else:
@@ -554,7 +662,7 @@ class LrsCalibRoute(LrsRouteBase):
 
                 self.parts.append(
                     LrsCalibPart(polyline, self.routeId, origins, self.crs, self.measureUnit, self.distanceArea,
-                                 allowSingleMilestone=self.allowSingleMilestoneParts()))
+                                 allowSingleMilestone=self.allowSingleMilestoneParts(), **self.routeContext()))
 
         # reconnect parts after parallels span
         if parallelParts and self.parallelMode == 'span':
@@ -613,7 +721,8 @@ class LrsCalibRoute(LrsRouteBase):
 
             if point.measure == None:
                 origin = LrsOrigin(QgsWkbTypes.PointGeometry, point.fid)
-                self.errors.append(LrsError(LrsError.NO_MEASURE, point.geo, routeId=self.routeId, origins=[origin]))
+                self.errors.append(LrsError(LrsError.NO_MEASURE, point.geo, routeId=self.routeId, origins=[origin],
+                                            codivia=point.codivia, direccio=point.direccio, idpk=point.idpk))
                 continue
 
             pts = []
@@ -657,7 +766,7 @@ class LrsCalibRoute(LrsRouteBase):
                 geo = QgsGeometry.fromPointXY(node['pnt'])
                 self.errors.append(
                     LrsError(LrsError.DUPLICATE_POINT, geo, routeId=self.routeId, measure=node['measures'],
-                             origins=node['origins']))
+                             origins=node['origins'], **self.routeContext()))
 
             measure = node['measures'][0]  # first if duplicates, for now
             self.milestones.append(
@@ -669,6 +778,9 @@ class LrsCalibRoute(LrsRouteBase):
         if self.routeId is None:
             return
 
+        if self.parts and not self.partSpatialIndex:
+            self.buildPartSpatialIndex()
+
         sqrThreshold = self.threshold * self.threshold
         for milestone in self.milestones:
             pointGeo = QgsGeometry.fromPointXY(milestone.pnt)
@@ -677,9 +789,19 @@ class LrsCalibRoute(LrsRouteBase):
             nearPartIdx = None
             nearSegment = None
             nearNearestPnt = None
-            for i in range(len(self.parts)):
+            rect = QgsRectangle(milestone.pnt.x() - self.threshold, milestone.pnt.y() - self.threshold,
+                                milestone.pnt.x() + self.threshold, milestone.pnt.y() + self.threshold)
+            candidateIds = self.partSpatialIndex.intersects(rect) if self.partSpatialIndex else []
+            if not candidateIds:
+                candidateIds = list(self.partSpatialIndexLookup.keys()) if self.partSpatialIndexLookup else []
+            for candidateId in candidateIds:
+                i = self.partSpatialIndexLookup.get(candidateId)
+                if i is None:
+                    continue
                 part = self.parts[i]
-                partGeo = QgsGeometry.fromPolylineXY(part.polyline)
+                partGeo = part.polylineGeo
+                if not partGeo:
+                    continue
                 # use epsilon=0, see https://github.io/blazek/lrs/issues/15
                 (sqDist, nearestPnt, afterVertex, leftOf) = partGeo.closestSegmentWithContext(milestone.pnt, 0)
                 segment = afterVertex - 1
@@ -702,7 +824,7 @@ class LrsCalibRoute(LrsRouteBase):
                 origin = LrsOrigin(QgsWkbTypes.PointGeometry, milestone.fid, milestone.geoPart, milestone.nGeoParts)
                 self.errors.append(
                     LrsError(LrsError.OUTSIDE_THRESHOLD, pointGeo, routeId=self.routeId, measure=milestone.measure,
-                             origins=[origin]))
+                             origins=[origin], **self.routeContext()))
 
     def calibrateParts(self):
         for part in self.parts:

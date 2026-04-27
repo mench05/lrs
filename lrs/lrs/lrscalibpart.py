@@ -42,9 +42,26 @@ class LrsCalibPart(LrsPartBase):
         self.goodMilestones = []  # milestones ok, used for LRS
         self.errors = []  # LrsError list
         self.allowSingleMilestone = kwargs.get('allowSingleMilestone', False)
+        self.codivia = kwargs.get('codivia', '')
+        self.direccio = kwargs.get('direccio', '')
+        self.idlrs = kwargs.get('idlrs', '')
+        self._coordsWithMeasuresCache = None
+        self._geometryWithMeasuresCache = None
+
+    def errorContext(self):
+        return {
+            'codivia': self.codivia,
+            'direccio': self.direccio,
+            'idlrs': self.idlrs,
+        }
+
+    def invalidateMeasureCaches(self):
+        self._coordsWithMeasuresCache = None
+        self._geometryWithMeasuresCache = None
 
     def setPolyline(self, polyline):
         self.polyline = polyline
+        self.invalidateMeasureCaches()
         # debug('setPolyline polyline: %s %s' % (type(polyline), polyline))
         # debug('setPolyline first: %s %s' % (type(polyline[0]), polyline[0]))
         # QgsGeometry.fromPolyline() returns None if polyline has only one point
@@ -60,7 +77,8 @@ class LrsCalibPart(LrsPartBase):
                 self.calibrateSingleMilestone()
                 return
             self.errors.append(
-                LrsError(LrsError.NOT_ENOUGH_MILESTONES, self.polylineGeo, routeId=self.routeId, origins=self.origins))
+                LrsError(LrsError.NOT_ENOUGH_MILESTONES, self.polylineGeo, routeId=self.routeId,
+                         origins=self.origins, **self.errorContext()))
             return
 
         # create list of milestones sorted by partMeasure
@@ -84,7 +102,8 @@ class LrsCalibPart(LrsPartBase):
 
         if up == down:
             self.errors.append(
-                LrsError(LrsError.DIRECTION_GUESS, self.polylineGeo, routeId=self.routeId, origins=self.origins))
+                LrsError(LrsError.DIRECTION_GUESS, self.polylineGeo, routeId=self.routeId,
+                         origins=self.origins, **self.errorContext()))
             return
         elif down > up:  # revert
             self.polyline.reverse()
@@ -143,7 +162,7 @@ class LrsCalibPart(LrsPartBase):
                     geo = QgsGeometry.fromPointXY(m.pnt)
                     origin = LrsOrigin(QgsWkbTypes.PointGeometry, m.fid, m.geoPart, m.nGeoParts)
                     self.errors.append(LrsError(LrsError.WRONG_MEASURE, geo, routeId=self.routeId, measure=m.measure,
-                                                origins=[origin]))
+                                                origins=[origin], **self.errorContext()))
                     del milestones[i]
 
         self.goodMilestones = milestones
@@ -156,6 +175,24 @@ class LrsCalibPart(LrsPartBase):
             if doubleNear(m1.measure, m2.measure): continue
             if doubleNear(m1.partMeasure, m2.partMeasure): continue
             self.records.append(LrsRecord(m1.measure, m2.measure, m1.partMeasure, m2.partMeasure))
+
+        self.addZeroOriginRecord(milestones)
+
+    def addZeroOriginRecord(self, milestones):
+        if not milestones or not self.records:
+            return
+
+        first = milestones[0]
+        if first.measure is None or first.partMeasure is None:
+            return
+        if first.measure <= 0 or first.partMeasure <= 0:
+            return
+        if doubleNear(first.measure, 0.0) or doubleNear(first.partMeasure, 0.0):
+            return
+
+        length = self.segmentLengthInMeasureUnits(0, first.partMeasure)
+        if self.isNearZeroOrigin(first.measure - length, first.measure):
+            self.records.insert(0, LrsRecord(0.0, first.measure, 0, first.partMeasure))
 
     def calibrateSingleMilestone(self):
         # Short ramps/connectors can be valid LRS pieces with one official PK at
@@ -170,11 +207,14 @@ class LrsCalibPart(LrsPartBase):
             LrsError.NOT_ENOUGH_MILESTONES, self.polylineGeo, routeId=self.routeId,
             measure=milestone.measure, origins=[origin] if origin else self.origins,
             severity='WARNING',
-            message='Single PK branch calibrated by extrapolating along geometry length'))
+            message='Single PK branch calibrated by extrapolating along geometry length',
+            **self.errorContext()))
 
         if milestone.partMeasure > 0 and not doubleNear(milestone.partMeasure, 0.0):
             length = self.segmentLengthInMeasureUnits(0, milestone.partMeasure)
             measureFrom = milestone.measure - length
+            if self.isNearZeroOrigin(measureFrom, milestone.measure):
+                measureFrom = 0.0
             self.records.append(LrsRecord(measureFrom, milestone.measure, 0, milestone.partMeasure))
 
         if milestone.partMeasure < self.length and not doubleNear(milestone.partMeasure, self.length):
@@ -195,6 +235,10 @@ class LrsCalibPart(LrsPartBase):
         length = convertDistanceUnits(length, qgisUnit, self.measureUnit)
         return length
 
+    def isNearZeroOrigin(self, measure, referenceMeasure):
+        tolerance = max(abs(referenceMeasure) * 0.001, 0.001)
+        return abs(measure) <= tolerance
+
     # extrapolate before and after (add calculated records)
     def extrapolate(self):
         # debug ('extrapolate part')
@@ -205,6 +249,8 @@ class LrsCalibPart(LrsPartBase):
             # measure = record.milestoneFrom - record.partFrom / self.mapUnitsPerMeasureUnit
             length = self.segmentLengthInMeasureUnits(0, record.partFrom)
             measure = record.milestoneFrom - length
+            if self.isNearZeroOrigin(measure, record.milestoneFrom):
+                measure = 0.0
 
             # debug ('routeId = %s measure = %s' % (self.routeId,measure) )
             self.records.insert(0, LrsRecord(measure, record.milestoneFrom, 0, record.partFrom))
@@ -247,6 +293,8 @@ class LrsCalibPart(LrsPartBase):
 
     def getGeometryWithMeasures(self):
         # debug('getGeometryWithMeasures')
+        if self._geometryWithMeasuresCache is not None:
+            return QgsGeometry(self._geometryWithMeasuresCache)
         coors = self.getCoordinatesWithMeasures()
         if not coors or len(coors) < 2: return None
 
@@ -255,7 +303,8 @@ class LrsCalibPart(LrsPartBase):
             point = QgsPoint(c[0], c[1])
             point.addMValue(c[2])
             linestring.addVertex(point)
-        return 	QgsGeometry(linestring)
+        self._geometryWithMeasuresCache = QgsGeometry(linestring)
+        return QgsGeometry(self._geometryWithMeasuresCache)
 
     # overridden
     def eventPointXY(self, start):
@@ -358,6 +407,8 @@ class LrsCalibPart(LrsPartBase):
     # for valid LRS
     def getCoordinatesWithMeasures(self):
         # debug('getCoordinatesWithMeasures routeId = %s' % self.routeId )
+        if self._coordsWithMeasuresCache is not None:
+            return self._coordsWithMeasuresCache
         coors = []
         if not self.records: return coors
 
@@ -397,4 +448,5 @@ class LrsCalibPart(LrsPartBase):
             if doubleNear(coors[i][2], coors[i - 1][2]):
                 del coors[i]
 
-        return coors
+        self._coordsWithMeasuresCache = coors
+        return self._coordsWithMeasuresCache

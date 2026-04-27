@@ -19,7 +19,10 @@
  *                                                                         *
  ***************************************************************************/
 """
+import base64
+import json
 import os
+import zlib
 
 from qgis.PyQt import uic
 from qgis.PyQt.QtCore import QVariant, QCoreApplication
@@ -29,6 +32,7 @@ from qgis.PyQt.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialo
 from qgis.core import QgsApplication
 from qgis.gui import QgsHighlight, QgsMapToolEmitPoint
 
+from ..lrs.error.lrserrorfields import LRS_ERROR_FIELDS
 from ..lrs.error.lrserrorlayermanager import LrsErrorLayerManager
 from ..lrs.error.lrserrorlinelayer import LrsErrorLineLayer
 from ..lrs.error.lrserrormodel import LrsErrorModel
@@ -38,6 +42,7 @@ from ..lrs.error.lrsqualitylayer import LrsQualityLayer
 from ..lrs.error.lrsqualitylayermanager import LrsQualityLayerManager
 from ..lrs.lrsevents import LrsEvents
 from ..lrs.lrscalib import LrsCalib
+from ..lrs.lrscache import LrsCache
 from ..lrs.lrslayer import LrsLayer
 from ..lrs.lrsoutput import LrsOutput
 from ..lrs.lrsmeasures import LrsMeasures
@@ -75,6 +80,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.locatePoint = None  # QgsPointXY
         self.locateHighlight = None  # QgsHighlight
         self.locatePickMapTool = None
+        self.locatePickAllRoutes = False
         self.previousMapTool = None
         self.errorPointLayer = None
         self.errorPointLayerManager = None
@@ -132,6 +138,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.locateHighlightCheckBox.stateChanged.connect(self.locateHighlightChanged)
         self.locateZoomButton.clicked.connect(self.locateZoom)
         self.locatePickButton.clicked.connect(self.activateLocatePickTool)
+        self.locatePickAllRoutesButton.clicked.connect(self.activateLocatePickAllRoutesTool)
         self.locateHelpButton.clicked.connect(lambda: self.showHelp('locate'))
         self.resetLocateRoutes()
         self.locateProgressBar.hide()
@@ -287,6 +294,10 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.errorZoomButton.clicked.connect(self.errorZoom)
         self.errorFilterLineEdit.textChanged.connect(self.errorFilterChanged)
 
+        self.addErrorTableButton = QPushButton(self.tr('Crear taula d\'errors'), self.errorWidget)
+        self.addErrorTableButton.setToolTip(self.tr('Crea una taula QGIS amb tots els errors de calibratge.'))
+        self.addQualityLayerButton.parentWidget().layout().insertWidget(3, self.addErrorTableButton)
+        self.addErrorTableButton.clicked.connect(self.addErrorTable)
         self.addErrorLayersButton.clicked.connect(self.addErrorLayers)
         self.addQualityLayerButton.clicked.connect(self.addQualityLayer)
         self.errorButtonBox.button(QDialogButtonBox.Help).clicked.connect(lambda: self.showHelp('errors'))
@@ -393,6 +404,9 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.addQualityLayerButton.setText('Crear capa de qualitat')
         self.addErrorLayersButton.setToolTip('Afegeix capes d\'error a la vista del mapa')
         self.addQualityLayerButton.setToolTip('Afegeix la capa de qualitat a la vista del mapa')
+        if hasattr(self, 'addErrorTableButton'):
+            self.addErrorTableButton.setText('Crear taula d\'errors')
+            self.addErrorTableButton.setToolTip('Crea una taula QGIS amb tots els errors de calibratge')
 
         for buttonBox in (self.eventsButtonBox, self.measureButtonBox, self.genButtonBox):
             buttonBox.button(QDialogButtonBox.Ok).setText('Acceptar')
@@ -421,13 +435,18 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
     def addLocatePickButton(self):
         parent = self.locateRouteCombo.parentWidget()
         layout = parent.layout() if parent else None
+        self.locatePickAllRoutesButton = QPushButton(self.tr('Capturar PK global'), parent)
+        self.locatePickAllRoutesButton.setToolTip(
+            self.tr('Fes clic al mapa per trobar el PK mes proper sense filtrar per la ruta seleccionada.'))
         self.locatePickButton = QPushButton(self.tr('Capturar PK al mapa'), parent)
         self.locatePickButton.setToolTip(
             self.tr('Fes clic al mapa per trobar la ruta LRS i la mesura més properes.'))
         if layout and isinstance(layout, QGridLayout):
             layout.addWidget(self.locatePickButton, 6, 2)
+            layout.addWidget(self.locatePickAllRoutesButton, 6, 3)
         elif layout:
             layout.addWidget(self.locatePickButton)
+            layout.addWidget(self.locatePickAllRoutesButton)
 
     def addGenerateRobustOptions(self):
         parent = self.genExtrapolateCheckBox.parentWidget()
@@ -552,6 +571,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.readLocateOptions()
         self.readEventsOptions()
         self.readMeasureOptions()
+        self.loadLrsCacheFromProject()
 
         # --------------------- set error layers if stored in project -------------------
         errorLineLayerId = project.readEntry(PROJECT_PLUGIN_NAME, "errorLineLayerId")[0]
@@ -580,6 +600,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
 
     def projectNew(self):
         self.deleteLrs()
+        self.clearLrsCache()
         self.resetGenerateOptions()
         self.resetEventsOptions()
         self.resetMeasureOptions()
@@ -590,6 +611,135 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
             self.lrs.disconnect()
             del self.lrs
         self.lrs = None
+
+    def lrsCacheKey(self):
+        lineLayer = self.genLineLayerCM.getLayer()
+        pointLayer = self.genPointLayerCM.getLayer()
+        return {
+            'lineLayerId': lineLayer.id() if lineLayer else '',
+            'pointLayerId': pointLayer.id() if pointLayer else '',
+            'lineFeatureCount': lineLayer.featureCount() if lineLayer else 0,
+            'pointFeatureCount': pointLayer.featureCount() if pointLayer else 0,
+            'lineModified': lineLayer.isModified() if lineLayer else False,
+            'pointModified': pointLayer.isModified() if pointLayer else False,
+            'lineRouteField': self.genLineRouteFieldCM.getFieldName(),
+            'pointRouteField': self.genPointRouteFieldCM.getFieldName(),
+            'pointMeasureField': self.genPointMeasureFieldCM.getFieldName(),
+            'selectionMode': self.genSelectionModeCM.value(),
+            'selection': self.genSelectionLineEdit.text(),
+            'measureUnit': self.genMeasureUnitCM.unit(),
+            'snap': self.genSnapSpin.value(),
+            'threshold': self.genThresholdSpin.value(),
+            'parallelMode': self.genParallelModeCM.value(),
+            'extrapolate': self.genExtrapolateCheckBox.isChecked(),
+            'useCompositeRouteId': self.genCompositeRouteIdCheckBox.isChecked(),
+            'compositeRouteFields': self.genCompositeRouteIdLineEdit.text(),
+            'useOfficialArcMeasures': self.genOfficialMeasuresCheckBox.isChecked(),
+            'strictDirection': self.genStrictDirectionCheckBox.isChecked(),
+            'allowSharedGeometryDirections': self.genSharedGeometryCheckBox.isChecked(),
+            'tolerantMode': self.genTolerantModeCheckBox.isChecked(),
+            'specialRamalHandling': self.genRamalHandlingCheckBox.isChecked(),
+            'specialRoundaboutHandling': self.genRoundaboutHandlingCheckBox.isChecked(),
+        }
+
+    def clearLrsCache(self):
+        project = QgsProject.instance()
+        try:
+            chunks = int(project.readEntry(PROJECT_PLUGIN_NAME, 'calibrationCacheChunks', '0')[0] or 0)
+        except ValueError:
+            chunks = 0
+        for idx in range(chunks):
+            project.removeEntry(PROJECT_PLUGIN_NAME, 'calibrationCache%d' % idx)
+        project.removeEntry(PROJECT_PLUGIN_NAME, 'calibrationCache')
+        project.removeEntry(PROJECT_PLUGIN_NAME, 'calibrationCacheChunks')
+        project.removeEntry(PROJECT_PLUGIN_NAME, 'calibrationCacheKey')
+
+    def writeLrsCacheToProject(self):
+        if not self.lrs or not hasattr(self.lrs, 'toCacheData'):
+            return
+        self.showGenProgress("Guardant cache", 100)
+        QgsApplication.processEvents()
+        cache = {
+            'key': self.lrsCacheKey(),
+            'lrs': self.lrs.toCacheData(),
+        }
+        encoded = base64.b64encode(
+            zlib.compress(json.dumps(cache, separators=(',', ':')).encode('utf-8'), 3)
+        ).decode('ascii')
+        project = QgsProject.instance()
+        self.clearLrsCache()
+        chunkSize = 250000
+        chunks = [encoded[i:i + chunkSize] for i in range(0, len(encoded), chunkSize)]
+        project.writeEntry(PROJECT_PLUGIN_NAME, 'calibrationCacheChunks', str(len(chunks)))
+        for idx, chunk in enumerate(chunks):
+            project.writeEntry(PROJECT_PLUGIN_NAME, 'calibrationCache%d' % idx, chunk)
+        project.writeEntry(PROJECT_PLUGIN_NAME, 'calibrationCacheKey', json.dumps(cache['key'], sort_keys=True))
+
+    def readLrsCacheFromProject(self):
+        project = QgsProject.instance()
+        chunksText = project.readEntry(PROJECT_PLUGIN_NAME, 'calibrationCacheChunks', '')[0]
+        if chunksText:
+            try:
+                chunks = int(chunksText)
+            except ValueError:
+                chunks = 0
+            encoded = ''.join(project.readEntry(PROJECT_PLUGIN_NAME, 'calibrationCache%d' % idx, '')[0]
+                              for idx in range(chunks))
+        else:
+            encoded = project.readEntry(PROJECT_PLUGIN_NAME, 'calibrationCache', '')[0]
+        if not encoded:
+            return None
+        try:
+            raw = zlib.decompress(base64.b64decode(encoded.encode('ascii'))).decode('utf-8')
+            return json.loads(raw)
+        except Exception as err:
+            logWarning('LRS calibration cache could not be read: %s' % err)
+            self.clearLrsCache()
+            return None
+
+    def loadLrsCacheFromProject(self):
+        cache = self.readLrsCacheFromProject()
+        if not cache:
+            return False
+        if cache.get('key') != self.lrsCacheKey():
+            logInfo('LRS calibration cache ignored because current calibration inputs differ')
+            return False
+
+        self.deleteLrs()
+        self.lrs = LrsCache(cache.get('lrs', {}))
+        if not self.lrs.isCalibrated():
+            self.deleteLrs()
+            return False
+
+        self.lrsLayer = self.lrs
+        self.setupErrorModel()
+        self.resetStats()
+        self.resetGenButtons()
+        self.resetLocateRoutes()
+        self.resetEventsButtons()
+        self.resetMeasureButtons()
+        self.updateMeasureUnits()
+        self.enableTabs()
+        logInfo('LRS calibration restored from project cache')
+        return True
+
+    def setupErrorModel(self):
+        self.errorZoomButton.setEnabled(False)
+        self.errorModel = LrsErrorModel()
+        self.errorModel.addErrors(self.lrs.getErrors())
+
+        self.sortErrorModel = QSortFilterProxyModel()
+        self.sortErrorModel.setFilterKeyColumn(-1)
+        self.sortErrorModel.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self.sortErrorModel.setDynamicSortFilter(True)
+        self.sortErrorModel.setSourceModel(self.errorModel)
+
+        self.errorView.setModel(self.sortErrorModel)
+        self.sortErrorModel.sort(0)
+        self.errorView.resizeColumnsToContents()
+        self.errorView.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.errorView.setSelectionMode(QTableView.SingleSelection)
+        self.errorView.selectionModel().selectionChanged.connect(self.errorSelectionChanged)
 
     def close(self):
         # #debug( "LrsDockWidget.close")
@@ -698,6 +848,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.tabWidget.setCurrentIndex(self.tabWidget.indexOf(self.helpTab))
 
     def lrsEdited(self):
+        self.clearLrsCache()
         self.resetStats()
 
     # ------------------- GENERATE (CALIBRATE) -------------------
@@ -871,29 +1022,13 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.genProgressLabel.setText("Registrant elements")
         self.lrs.progressChanged.connect(self.showGenProgress)
         self.lrs.calibrate()
+        self.writeLrsCacheToProject()
 
         self.hideGenProgress()
         self.resetStats()
 
         # ------------------- errors -------------------
-        self.errorZoomButton.setEnabled(False)
-        self.errorModel = LrsErrorModel()
-        self.errorModel.addErrors(self.lrs.getErrors())
-
-        self.sortErrorModel = QSortFilterProxyModel()
-        self.sortErrorModel.setFilterKeyColumn(-1)  # all columns
-        self.sortErrorModel.setFilterCaseSensitivity(Qt.CaseInsensitive)
-        self.sortErrorModel.setDynamicSortFilter(True)
-        self.sortErrorModel.setSourceModel(self.errorModel)
-
-        self.errorView.setModel(self.sortErrorModel)
-        self.sortErrorModel.sort(0)
-        self.errorView.resizeColumnsToContents()
-        self.errorView.setSelectionBehavior(QAbstractItemView.SelectRows)
-        # Attention, if selectionMode is QTableView.SingleSelection, selection is not
-        # cleared if deleted row was selected (at least one row is always selected)
-        self.errorView.setSelectionMode(QTableView.SingleSelection)
-        self.errorView.selectionModel().selectionChanged.connect(self.errorSelectionChanged)
+        self.setupErrorModel()
 
         self.lrs.updateErrors.connect(self.updateErrors)
 
@@ -905,6 +1040,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
             self.iface.mapCanvas().refresh()
 
         self.lrs.edited.connect(self.lrsEdited)
+        self.lrsLayer = self.lrs
 
         self.resetGenButtons()
         self.resetLocateRoutes()
@@ -973,6 +1109,36 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         if not error:
             return
         self.errorVisualizer.zoom(error, self.lrs.crs)
+
+    def addErrorTable(self):
+        if not self.lrs:
+            return
+
+        outputLayer = QgsVectorLayer('None', self.tr('Errors LRS'), 'memory')
+        provider = outputLayer.dataProvider()
+        provider.addAttributes([LRS_ERROR_FIELDS.at(i) for i in range(LRS_ERROR_FIELDS.count())])
+        outputLayer.updateFields()
+
+        outputFeatures = []
+        fields = outputLayer.fields()
+        for error in self.lrs.getErrors():
+            feature = QgsFeature(fields)
+            feature.setAttribute('error', error.typeLabel())
+            feature.setAttribute('severity', error.severity)
+            feature.setAttribute('element', error.elementType)
+            feature.setAttribute('route', '%s' % error.routeId)
+            feature.setAttribute('measure', error.getMeasureString())
+            feature.setAttribute('codivia', '%s' % error.codivia)
+            feature.setAttribute('direccio', '%s' % error.direccio)
+            feature.setAttribute('idlrs', '%s' % error.idlrs)
+            feature.setAttribute('idpk', '%s' % error.idpk)
+            feature.setAttribute('message', error.message)
+            outputFeatures.append(feature)
+
+        if outputFeatures:
+            provider.addFeatures(outputFeatures)
+        outputLayer.updateExtents()
+        QgsProject.instance().addMapLayers([outputLayer])
 
         # add new error layers to map
 
@@ -1164,8 +1330,9 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         point = None
         if routeIds:
             error = None
+            tolerance = self.lrsLayer.defaultMeasureTolerance(150.0) if hasattr(self.lrsLayer, 'defaultMeasureTolerance') else 0
             for routeId in routeIds:
-                point, error = self.lrsLayer.eventPointXY(routeId, measure)
+                point, error = self.lrsLayer.eventPointXY(routeId, measure, tolerance)
                 if point:
                     break
 
@@ -1188,6 +1355,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         self.locateZoomButton.setEnabled(bool(point))
 
     def activateLocatePickTool(self):
+        self.locatePickAllRoutes = False
         if not self.lrsLayer:
             self.locateCoordinates.setText(self.tr('La capa LRS no està disponible'))
             return
@@ -1198,6 +1366,19 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
             self.locatePickMapTool.canvasClicked.connect(self.locateMapClicked)
         canvas.setMapTool(self.locatePickMapTool)
         self.locateCoordinates.setText(self.tr('Fes clic al mapa'))
+
+    def activateLocatePickAllRoutesTool(self):
+        self.locatePickAllRoutes = True
+        if not self.lrsLayer:
+            self.locateCoordinates.setText(self.tr('La capa LRS no esta disponible'))
+            return
+        canvas = self.iface.mapCanvas()
+        self.previousMapTool = canvas.mapTool()
+        if self.locatePickMapTool is None:
+            self.locatePickMapTool = QgsMapToolEmitPoint(canvas)
+            self.locatePickMapTool.canvasClicked.connect(self.locateMapClicked)
+        canvas.setMapTool(self.locatePickMapTool)
+        self.locateCoordinates.setText(self.tr('Fes clic al mapa (totes les rutes)'))
 
     def locateMapClicked(self, point, button):
         if not self.lrsLayer:
@@ -1215,7 +1396,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         # junctions or parallel carriageways.
         threshold = max(self.iface.mapCanvas().mapUnitsPerPixel() * 12, 10.0)
         threshold = min(threshold, 50.0)
-        selectedRouteIds = self.locateSelectedRouteIds()
+        selectedRouteIds = [] if self.locatePickAllRoutes else self.locateSelectedRouteIds()
         routeIds = selectedRouteIds if selectedRouteIds else None
         routeId, measure, distance = self.lrsLayer.pointMeasureForRoutes(lrsPoint, threshold, routeIds)
 
@@ -1237,6 +1418,7 @@ class LrsDockWidget(QDockWidget, Ui_LrsDockWidget):
         if self.previousMapTool:
             self.iface.mapCanvas().setMapTool(self.previousMapTool)
             self.previousMapTool = None
+        self.locatePickAllRoutes = False
 
     def selectLocateRouteId(self, routeId):
         targetValue = None

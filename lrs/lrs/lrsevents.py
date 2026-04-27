@@ -49,7 +49,7 @@ class LrsEvents(QObject):
         fixFields(fieldsList)
         provider.addAttributes(fieldsList)
         if errorFieldName:
-            provider.addAttributes([QgsField(errorFieldName, QVariant.String, "string"), ])
+            provider.addAttributes([makeField(errorFieldName, QVariant.String), ])
         uri = provider.dataSourceUri()
         # debug('uri: %s' % uri)
 
@@ -70,17 +70,10 @@ class LrsEvents(QObject):
 
         # outputLayer.commitChanges()
 
-        # It may happen that event goes slightly outside available lrs because of
-        # decimal number inaccuracy. Thus we set tolerance used to try to find nearest point event within that
-        # tolerance and skip smaller linear event errors (gaps)
-        # 0.1m is too much and less than 0.01 m does not make sense in standard GIS
-        #eventTolerance = convertDistanceUnits(0.01, LrsUnits.METER, self.lrs.measureUnit)
-
-        # For LrsLayer with existing measure we don't know measure units, but it is little probable that it is
-        # more than km or miles (if we stay on Earth) 0.0001 km = 10 cm tolerance should not be too much for
-        # meters and it should sufficient for km
-        # TODO: add tolerance widget?
-        eventTolerance = 0.0001
+        # Real-world official networks often have a small offset between the
+        # first/last calibrated measure and the operational PK used by events.
+        # Use a practical tolerance rather than only decimal-noise tolerance.
+        eventTolerance = self.lrs.defaultMeasureTolerance(150.0)
 
         outputFeatures = []
         batchSize = 500
